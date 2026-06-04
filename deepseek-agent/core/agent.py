@@ -209,7 +209,7 @@ class Agent:
         return False
 
     def run(self, user_input, callback=None):
-        self.messages.append({"role": "user", "content": f"JSON API ready. Input: {user_input}"})
+        self.messages.append({"role": "user", "content": f"{user_input}\n\n(respond ONLY with JSON: {{\"name\":\"exec\",\"arguments\":{{\"command\":\"CMD\"}}}} or other tool JSON. No text. JSON only.)"})
         last_output = ""
         retries = 0
         max_retries = 3
@@ -248,7 +248,7 @@ class Agent:
                 self.messages.append({"role": "assistant", "content": response})
                 self.messages.append({
                     "role": "user",
-                    "content": f"[Tool result]\n{output}\n\nContinue. If fully done output: {{\"name\":\"exec\",\"arguments\":{{\"command\":\"echo TASK_DONE\"}}}}"
+                    "content": f"[Tool result]\n{output}\n\nIf task is done, respond with: {{\"name\":\"exec\",\"arguments\":{{\"command\":\"echo TASK_DONE\"}}}}. Otherwise continue with JSON tool call."
                 })
 
             else:
@@ -264,7 +264,7 @@ class Agent:
                 self.messages.append({"role": "assistant", "content": response})
                 self.messages.append({
                     "role": "user",
-                    "content": 'WRONG FORMAT. Output ONLY JSON. No text. Example:\n{"name":"exec","arguments":{"command":"whoami"}}'
+                    "content": 'Output ONLY JSON. No text. Example: {"name":"exec","arguments":{"command":"whoami"}}'
                 })
 
         if callback:
