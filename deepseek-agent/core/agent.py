@@ -1,108 +1,62 @@
 #!/usr/bin/env python3
 """
-DeepSeek Agent — mirrors opencode agent loop.
+DeepSeek Agent — opencode-style agent loop.
 
-Key design (from opencode source):
-  - Single agentic loop: model decides EVERYTHING
-  - todowrite is a TOOL, not a planning phase
-  - Model chooses when 3+ steps need a todo list
-  - Tool results appended to history, loop continues
-  - Loop ends on plain-text response (no JSON = done)
+Strategy (adapted for chat.deepseek.com free API):
+  - deepseek-coder generates a bash script / plan from the user request
+  - We parse the script into ordered steps (todo list)
+  - Execute each step, feed result back to model for next decision
+  - For simple tasks (1-2 steps): skip todo, run directly
+  - For complex tasks (3+ steps): create todo list, mark in_progress/completed per step
+
+This mirrors opencode's architecture:
+  - todowrite rules: use when task has 3+ distinct steps
+  - Single in_progress at a time
+  - Mark completed only after verifying the output
+  - Model decides what to do next after each result
 """
+
 import json, re, subprocess, os, time
 from pathlib import Path
 from .client import DeepSeekClient
 
-# ─── System prompt ─────────────────────────────────────────────────────────────
-# Mirrors opencode Gemini/Claude prompt philosophy:
-# - Concise, no chitchat, tool-first
-# - Todowrite rules copied from opencode/src/tool/todowrite.txt
-SYSTEM_PROMPT = """You are an autonomous terminal agent on a real Linux system.
-For every action, output a raw JSON tool call. When fully done, output plain text.
+# ─── System prompts ────────────────────────────────────────────────────────────
 
-## Tool formats (use any of these — all are accepted):
-{"name":"exec","arguments":{"command":"CMD"}}
-{"name":"write_file","arguments":{"path":"/abs/path","content":"TEXT"}}
-{"name":"read_file","arguments":{"path":"/abs/path"}}
-{"name":"edit_file","arguments":{"path":"/abs/path","old":"OLD","new":"NEW"}}
-{"name":"todowrite","arguments":{"todos":[{"content":"task","status":"pending","priority":"high"}]}}
+# Phase 1: Planner — generates a bash script from the task
+PLANNER_PROMPT = """You are a bash automation expert. Given a task, output ONLY a pure bash script.
+Rules:
+- Output ONLY bash commands, nothing else
+- No markdown fences, no explanation
+- Use printf or heredoc for multi-line file content
+- All paths must be absolute
+- One logical action per line
+- Comments allowed (# ...)"""
 
-Alternative exec format also accepted:
-{"tool":"run_command","command":"CMD"}
+# Phase 2: Executor — decides what to do after seeing a step result
+EXECUTOR_PROMPT = """You are a terminal agent observer. Given a completed step and its output, decide what to do.
+If the output looks correct and there are more steps: respond with CONTINUE
+If something failed and needs fixing: respond with a bash command to fix it (one line only)
+If all work is done: respond with DONE: <brief summary>
+Output ONLY one of: CONTINUE / a bash command / DONE: summary"""
 
-## todowrite — when to use (from opencode rules)
-USE when task has 3+ distinct steps, multiple tasks given, or mid-work sub-tasks found.
-SKIP for single actions or informational questions.
-
-## todowrite — rules
-- Create ALL todos upfront (status=pending) before starting work
-- Set exactly ONE to in_progress when you start it
-- Set to completed only AFTER verifying the work is done
-- Update in real time, never batch
-- One in_progress at a time
-
-## Output rules
-- Output ONLY JSON for tool calls, ONLY plain text when done
-- Use absolute file paths
-- After each [Tool result], decide next action
-"""
-
-FEW_SHOT = [
-    {"role": "user",
-     "content": "JSON ONLY: show current date"},
-    {"role": "assistant",
-     "content": '{"tool":"run_command","command":"date"}'},
-    {"role": "user",
-     "content": "[Tool result]\nFri Jun  5 2026\n\nJSON ONLY: next tool or DONE: summary."},
-    {"role": "assistant",
-     "content": "Date: Fri Jun 5 2026"},
-
-    {"role": "user",
-     "content": "JSON ONLY: create /tmp/hi.py with print hi, then run it"},
-    {"role": "assistant",
-     "content": '{"name":"todowrite","arguments":{"todos":[{"content":"Create /tmp/hi.py","status":"in_progress","priority":"high"},{"content":"Run /tmp/hi.py","status":"pending","priority":"high"}]}}'},
-    {"role": "user",
-     "content": "[Tool result]\n[Todo updated]\n\nJSON ONLY: next tool or DONE: summary."},
-    {"role": "assistant",
-     "content": '{"name":"write_file","arguments":{"path":"/tmp/hi.py","content":"print(\'hi\')"}}'},
-    {"role": "user",
-     "content": "[Tool result]\n[Wrote 10 chars]\n\nJSON ONLY: next tool or DONE: summary."},
-    {"role": "assistant",
-     "content": '{"name":"todowrite","arguments":{"todos":[{"content":"Create /tmp/hi.py","status":"completed","priority":"high"},{"content":"Run /tmp/hi.py","status":"in_progress","priority":"high"}]}}'},
-    {"role": "user",
-     "content": "[Tool result]\n[Todo updated]\n\nJSON ONLY: next tool or DONE: summary."},
-    {"role": "assistant",
-     "content": '{"tool":"run_command","command":"python3 /tmp/hi.py"}'},
-    {"role": "user",
-     "content": "[Tool result]\nhi\n\nJSON ONLY: next tool or DONE: summary."},
-    {"role": "assistant",
-     "content": '{"name":"todowrite","arguments":{"todos":[{"content":"Create /tmp/hi.py","status":"completed","priority":"high"},{"content":"Run /tmp/hi.py","status":"completed","priority":"high"}]}}'},
-    {"role": "user",
-     "content": "[Tool result]\n[Todo updated]\n\nJSON ONLY: next tool or DONE: summary."},
-    {"role": "assistant",
-     "content": "Done: created /tmp/hi.py and ran it — output: hi"},
-]
-
+# ─── Aliases ──────────────────────────────────────────────────────────────────
 TOOL_ALIASES = {
-    "execute_command":"exec","run_command":"exec","bash":"exec","shell":"exec",
-    "execute":"exec","run":"exec","terminal":"exec","cmd":"exec","command":"exec",
-    "file_read":"read_file","open_file":"read_file","cat":"read_file",
-    "file_write":"write_file","create_file":"write_file","write":"write_file",
-    "file_edit":"edit_file","modify_file":"edit_file","patch":"edit_file",
+    "run_command":"exec","execute_command":"exec","bash":"exec","shell":"exec",
+    "execute":"exec","run":"exec","cmd":"exec","command":"exec",
+    "file_write":"write_file","create_file":"write_file",
+    "file_read":"read_file","open_file":"read_file",
     "todo_write":"todowrite","todo_update":"todowrite","update_todos":"todowrite",
-    "todo_add":"todowrite","todo":"todowrite","todos":"todowrite",
-    "todo_list":"todowrite",
 }
 
 
 class Agent:
-    def __init__(self, client: DeepSeekClient, model: str = "deepseek-v3", max_rounds: int = 40):
+    def __init__(self, client: DeepSeekClient, model: str = "deepseek-coder", max_rounds: int = 40):
         self.client     = client
         self.model      = model
         self.max_rounds = max_rounds
-        self.messages: list[dict] = []
+        self.messages: list[dict] = []   # persistent conversation history
         self.tools_used: list[str] = []
-        self.todos: list[dict] = []
+        self.todos: list[dict] = []      # [{content, status, priority}]
 
     # ── Shell ──────────────────────────────────────────────────────────────────
     def _exec(self, command: str) -> str:
@@ -110,11 +64,11 @@ class Agent:
             r = subprocess.run(command, shell=True, capture_output=True,
                                text=True, timeout=120, cwd=os.getcwd())
             out = (r.stdout + r.stderr).strip()
-            return out[:8000] if out else f"[Exit code: {r.returncode}]"
+            return out[:6000] if out else f"[exit {r.returncode}]"
         except subprocess.TimeoutExpired:
-            return "[Timeout: > 120s]"
+            return "[Timeout >120s]"
         except Exception as e:
-            return f"[Exec error: {e}]"
+            return f"[Error: {e}]"
 
     # ── Files ──────────────────────────────────────────────────────────────────
     def _write_file(self, path: str, content: str) -> str:
@@ -122,13 +76,13 @@ class Agent:
             p = Path(path)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content)
-            return f"[Wrote {len(content)} chars to {path}]"
+            return f"[Wrote {len(content)} chars → {path}]"
         except Exception as e:
             return f"[Write error: {e}]"
 
     def _read_file(self, path: str) -> str:
         try:
-            return Path(path).read_text()[:8000]
+            return Path(path).read_text()[:6000]
         except Exception as e:
             return f"[Read error: {e}]"
 
@@ -143,259 +97,328 @@ class Agent:
         except Exception as e:
             return f"[Edit error: {e}]"
 
-    # ── Todo (mirrors opencode Todo.Info[]) ────────────────────────────────────
-    def _todowrite(self, todos: list) -> str:
-        normalised = []
-        for t in todos:
-            if isinstance(t, str):
-                normalised.append({"content": t, "status": "pending", "priority": "medium"})
-            elif isinstance(t, dict):
-                normalised.append({
-                    "content":  str(t.get("content", t.get("item", t.get("task", "")))),
-                    "status":   str(t.get("status", "pending")),
-                    "priority": str(t.get("priority", "medium")),
-                })
-        self.todos = normalised
-        pending = sum(1 for t in self.todos if t["status"] not in ("completed", "cancelled"))
-        return f"[Todo list updated — {len(self.todos)} items, {pending} pending]"
+    # ── Todo ───────────────────────────────────────────────────────────────────
+    def _set_todos(self, items: list[str], priority: str = "medium"):
+        """Initialize todo list from a list of strings."""
+        self.todos = [
+            {"content": item, "status": "pending", "priority": priority}
+            for item in items
+        ]
+
+    def _mark_in_progress(self, idx: int):
+        for i, t in enumerate(self.todos):
+            if t["status"] == "in_progress":
+                t["status"] = "pending"  # reset previous
+        if idx < len(self.todos):
+            self.todos[idx]["status"] = "in_progress"
+
+    def _mark_done(self, idx: int):
+        if idx < len(self.todos):
+            self.todos[idx]["status"] = "completed"
 
     def _todo_display(self) -> str:
         if not self.todos:
             return "[No todos]"
         icons = {"pending": "○", "in_progress": "▶", "completed": "✓", "cancelled": "✗"}
-        pri_tag = {"high": "[H]", "medium": "[M]", "low": "[L]"}
+        pri   = {"high": "[H]", "medium": "[M]", "low": "[L]"}
         lines = []
         for t in self.todos:
-            icon = icons.get(t["status"], "?")
-            pri  = pri_tag.get(t.get("priority", "medium"), "")
-            lines.append(f"  {icon} {pri} {t['content']}")
+            lines.append(f"  {icons.get(t['status'],'?')} {pri.get(t.get('priority','medium'),'')} {t['content']}")
         done = sum(1 for t in self.todos if t["status"] == "completed")
         lines.append(f"\n  {done}/{len(self.todos)} completed")
         return "\n".join(lines)
 
-    # ── Parse tool call ────────────────────────────────────────────────────────
+    # ── Script parser ──────────────────────────────────────────────────────────
+    def _parse_script(self, script: str) -> list[str]:
+        """
+        Extract ordered bash commands from a script string.
+        Groups logical multi-line constructs (heredoc, if, for) together.
+        Returns list of command strings.
+        """
+        # Remove markdown fences
+        script = re.sub(r"```(?:bash|sh)?\n?", "", script)
+        script = re.sub(r"```", "", script).strip()
+
+        steps = []
+        buffer = []
+        heredoc_end = None
+
+        for line in script.split("\n"):
+            stripped = line.strip()
+
+            # Inside heredoc
+            if heredoc_end:
+                buffer.append(line)
+                if stripped == heredoc_end:
+                    steps.append("\n".join(buffer))
+                    buffer = []
+                    heredoc_end = None
+                continue
+
+            # Empty or comment-only
+            if not stripped or stripped.startswith("#"):
+                if buffer:
+                    buffer.append(line)
+                continue
+
+            # Detect heredoc start
+            hd = re.search(r"<<\s*['\"]?(\w+)['\"]?", line)
+            if hd:
+                buffer.append(line)
+                heredoc_end = hd.group(1)
+                continue
+
+            # Continuation
+            if stripped.endswith("\\") or stripped.startswith("&&") or stripped.startswith("||") or stripped.startswith("|"):
+                buffer.append(line)
+                continue
+
+            # Normal line
+            if buffer:
+                # Check if prev line ends with \ meaning continuation
+                if buffer[-1].rstrip().endswith("\\"):
+                    buffer.append(line)
+                    continue
+                else:
+                    steps.append("\n".join(buffer))
+                    buffer = []
+
+            steps.append(line.strip())
+
+        if buffer:
+            steps.append("\n".join(buffer))
+
+        # Filter out empty
+        return [s for s in steps if s.strip() and not s.strip().startswith("#")]
+
+    # ── LLM call ──────────────────────────────────────────────────────────────
+    def _call_model(self, system: str, messages: list[dict]) -> str:
+        full = [{"role": "system", "content": system}] + messages
+        try:
+            return self.client.send_message(full, self.model).strip()
+        except Exception as e:
+            return f"[API error: {e}]"
+
+    # ── Parse inline tool call (fallback for simple single-tool responses) ─────
     def _parse_tool_call(self, response: str) -> dict | None:
         text = re.sub(r"```(?:json)?\s*", "", response)
         text = re.sub(r"```", "", text).strip()
 
-        def _alias(n: str) -> str:
+        def _alias(n):
             return TOOL_ALIASES.get(n, n)
 
-        def _normalise(d) -> dict | None:
+        def _normalise(d):
             if not isinstance(d, dict):
                 return None
-            # Canonical {name, arguments}
             if "name" in d and "arguments" in d:
                 d["name"] = _alias(d["name"]); return d
-            # {tool_calls: [{name, arguments}]}
             if "tool_calls" in d:
                 calls = d["tool_calls"]
                 if isinstance(calls, list) and calls:
                     tc = calls[0]
-                    return {"name": _alias(tc.get("name", "")),
-                            "arguments": tc.get("arguments", tc.get("parameters", {}))}
-            # {function, parameters}
+                    return {"name": _alias(tc.get("name","")),
+                            "arguments": tc.get("arguments",tc.get("parameters",{}))}
             if "function" in d:
                 return {"name": _alias(d["function"]),
-                        "arguments": d.get("parameters", d.get("arguments", {}))}
-            # {name, *}
+                        "arguments": d.get("parameters",d.get("arguments",{}))}
             if "name" in d:
                 return {"name": _alias(d["name"]),
-                        "arguments": d.get("arguments", d.get("parameters", d.get("args", {})))}
-            # {tool, command/path/...}  — model-native variant
+                        "arguments": d.get("arguments",d.get("parameters",d.get("args",{})))}
             if "tool" in d:
-                raw  = d["tool"]
-                name = _alias(raw)
-                rest = {k: v for k, v in d.items() if k != "tool"}
-                if name == "exec":
-                    cmd = rest.get("command", rest.get("cmd",
-                          " ".join(str(v) for v in rest.values())))
-                    return {"name": "exec", "arguments": {"command": cmd}}
-                if name == "write_file":
-                    return {"name": "write_file",
-                            "arguments": {"path":    rest.get("path", rest.get("filepath", "")),
-                                          "content": rest.get("content", "")}}
-                if name == "read_file":
-                    return {"name": "read_file",
-                            "arguments": {"path": rest.get("path", rest.get("filepath", ""))}}
-                # Anything else: exec from tool name + args
-                return {"name": "exec",
-                        "arguments": {"command": raw + " " + " ".join(str(v) for v in rest.values())}}
+                raw=d["tool"]; name=_alias(raw)
+                rest={k:v for k,v in d.items() if k!="tool"}
+                if name=="exec":
+                    cmd=rest.get("command",rest.get("cmd"," ".join(str(v) for v in rest.values())))
+                    return {"name":"exec","arguments":{"command":cmd}}
+                if name=="write_file":
+                    return {"name":"write_file","arguments":{"path":rest.get("path",rest.get("filepath","")),"content":rest.get("content","")}}
+                if name=="read_file":
+                    return {"name":"read_file","arguments":{"path":rest.get("path",rest.get("filepath",""))}}
+                return {"name":"exec","arguments":{"command":raw+" "+" ".join(str(v) for v in rest.values())}}
             return None
 
-        def _fix(tool: dict) -> dict:
-            name = tool["name"]
-            args = tool.get("arguments", {})
-            if name == "exec":
-                if isinstance(args, str):
-                    tool["arguments"] = {"command": args}
-                elif isinstance(args, dict):
-                    for alias in ("cmd", "shell_command", "shell", "bash", "script", "command_string"):
-                        if alias in args and "command" not in args:
-                            args["command"] = args.pop(alias)
-            if name in ("write_file", "create_file"):
-                tool["name"] = "write_file"
-                if isinstance(args, dict) and "filepath" in args and "path" not in args:
-                    args["path"] = args.pop("filepath")
-            if name in ("read_file", "open_file"):
-                tool["name"] = "read_file"
-                if isinstance(args, dict) and "filepath" in args and "path" not in args:
-                    args["path"] = args.pop("filepath")
-            if name == "todowrite":
-                raw = args.get("todos", []) if isinstance(args, dict) else args if isinstance(args, list) else []
-                normed = []
-                for t in raw:
-                    if isinstance(t, str):
-                        normed.append({"content": t, "status": "pending", "priority": "medium"})
-                    elif isinstance(t, dict):
-                        normed.append({
-                            "content":  t.get("content", t.get("item", t.get("task", ""))),
-                            "status":   t.get("status", "pending" if not t.get("done") else "completed"),
-                            "priority": t.get("priority", "medium"),
-                        })
-                if isinstance(args, dict):
-                    tool["arguments"]["todos"] = normed
-                else:
-                    tool["arguments"] = {"todos": normed}
-            return tool
-
-        # Try full JSON
         try:
-            r = _normalise(json.loads(text))
-            if r: return _fix(r)
-        except Exception:
-            pass
+            r=_normalise(json.loads(text))
+            if r: return r
+        except: pass
 
-        # Balanced braces
-        depth = 0; start = None
-        for i, ch in enumerate(text):
-            if ch == "{":
-                if depth == 0: start = i
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0 and start is not None:
+        depth=0; start=None
+        for i,ch in enumerate(text):
+            if ch=="{":
+                if depth==0: start=i
+                depth+=1
+            elif ch=="}":
+                depth-=1
+                if depth==0 and start is not None:
                     try:
-                        r = _normalise(json.loads(text[start:i + 1]))
-                        if r: return _fix(r)
-                    except Exception:
-                        pass
-                    start = None
-
-        # Line by line
-        for line in text.split("\n"):
-            line = line.strip()
-            if any(k in line for k in ('"name"', '"tool"', '"function"')):
-                try:
-                    r = _normalise(json.loads(line))
-                    if r: return _fix(r)
-                except Exception:
-                    pass
+                        r=_normalise(json.loads(text[start:i+1]))
+                        if r: return r
+                    except: pass
+                    start=None
         return None
 
-    # ── Execute tool ───────────────────────────────────────────────────────────
+    # ── Execute parsed tool ────────────────────────────────────────────────────
     def _execute_tool(self, tool: dict) -> str:
-        name = tool["name"]
-        args = tool.get("arguments", {})
+        name=tool["name"]; args=tool.get("arguments",{})
         self.tools_used.append(name)
-        if name == "exec":       return self._exec(args.get("command", "echo no_cmd"))
-        if name == "read_file":  return self._read_file(args.get("path", ""))
-        if name == "write_file": return self._write_file(args.get("path", ""), args.get("content", ""))
-        if name == "edit_file":  return self._edit_file(args.get("path", ""), args.get("old", ""), args.get("new", ""))
-        if name == "todowrite":  return self._todowrite(args.get("todos", []))
+        if name=="exec":       return self._exec(args.get("command","echo no_cmd"))
+        if name=="read_file":  return self._read_file(args.get("path",""))
+        if name=="write_file": return self._write_file(args.get("path",""),args.get("content",""))
+        if name=="edit_file":  return self._edit_file(args.get("path",""),args.get("old",""),args.get("new",""))
         return f"[Unknown tool: {name}]"
 
     # ── Main agent loop ────────────────────────────────────────────────────────
     def run(self, user_input: str, callback=None) -> str:
         """
-        Agentic loop — mirrors opencode session loop:
-          build context → call LLM → tool call? → execute → append → loop
-                                   → plain text? → done
-        The model autonomously decides when to use todowrite.
+        opencode-style agent loop:
+
+        1. Ask model to generate a bash script / plan (PLANNER)
+        2. Parse script into steps
+        3. If 1-2 steps: run directly (no todo)
+           If 3+ steps: create todo list (mirrors opencode todowrite rules)
+        4. For each step:
+           - Mark in_progress
+           - Execute
+           - Feed result to EXECUTOR model
+           - EXECUTOR says CONTINUE / fix command / DONE
+        5. Mark completed, move to next
         """
         self.tools_used = []
-        self.messages.append({"role": "user", "content": f"JSON ONLY: {user_input}"})
 
-        max_retries  = 3
-        retries      = 0
+        # Save to conversation history
+        self.messages.append({"role": "user", "content": user_input})
+
+        if callback:
+            callback("thinking", "Planning task...")
+
+        # ── Phase 1: Generate plan ─────────────────────────────────────────────
+        plan_resp = self._call_model(PLANNER_PROMPT, [{"role":"user","content":f"Task: {user_input}"}])
+
+        # Check if it's a direct tool call (simple case)
+        tool_call = self._parse_tool_call(plan_resp)
+        if tool_call:
+            if callback:
+                callback("exec", json.dumps(tool_call, ensure_ascii=False))
+            output = self._execute_tool(tool_call)
+            if callback:
+                callback("output", output)
+            self.messages.append({"role":"assistant","content":output})
+            if callback:
+                callback("done", output)
+            return output
+
+        # Parse into steps
+        steps = self._parse_script(plan_resp)
+
+        if not steps:
+            # Model returned plain text — conversational response
+            self.messages.append({"role":"assistant","content":plan_resp})
+            if callback:
+                callback("done", plan_resp)
+            return plan_resp
+
+        # ── Phase 2: Create todo if 3+ steps (opencode rule) ──────────────────
+        use_todo = len(steps) >= 3
+
+        if use_todo:
+            self._set_todos(steps, priority="high")
+            if callback:
+                callback("todo_update", self._todo_display())
+
+        # ── Phase 3: Execute each step ─────────────────────────────────────────
+        exec_history = []
         final_output = ""
 
-        for round_num in range(1, self.max_rounds + 1):
-            if callback:
-                callback("thinking", f"Round {round_num}/{self.max_rounds}")
+        for idx, step in enumerate(steps):
+            if idx >= self.max_rounds:
+                break
 
-            full_messages = (
-                [{"role": "system", "content": SYSTEM_PROMPT}]
-                + FEW_SHOT
-                + self.messages
-            )
-
-            try:
-                response = self.client.send_message(full_messages, self.model)
-            except Exception as e:
-                err = f"[API error: {e}]"
-                self.messages.append({"role": "assistant", "content": err})
-                return err
-
-            response = response.strip()
-
-            if not response:
-                retries += 1
+            # Mark in_progress
+            if use_todo:
+                self._mark_in_progress(idx)
                 if callback:
-                    callback("thinking", f"Empty response (retry {retries}/{max_retries})")
-                if retries >= max_retries:
-                    break
-                self.messages.append({"role": "assistant", "content": ""})
-                self.messages.append({
-                    "role": "user",
-                    "content": "JSON ONLY: continue — next tool call, or DONE: plain text summary."
-                })
+                    callback("todo_update", self._todo_display())
+
+            # Show step
+            if callback:
+                callback("exec", json.dumps({"name":"exec","arguments":{"command":step}},ensure_ascii=False))
+
+            output = self._exec(step)
+            final_output = output
+            self.tools_used.append("exec")
+
+            if callback:
+                callback("output", output)
+
+            exec_history.append({"role":"user","content":f"Step: {step}"})
+            exec_history.append({"role":"user","content":f"Output: {output}"})
+
+            # Mark done
+            if use_todo:
+                self._mark_done(idx)
+                if callback:
+                    callback("todo_update", self._todo_display())
+
+            time.sleep(1.2)
+
+            # ── Ask executor if we should continue or fix ──────────────────────
+            remaining = steps[idx+1:]
+            if not remaining:
+                break
+
+            exec_ctx = (
+                f"Completed step {idx+1}/{len(steps)}: {step}\n"
+                f"Output: {output[:500]}\n"
+                f"Remaining steps: {remaining[:3]}"
+            )
+            executor_resp = self._call_model(EXECUTOR_PROMPT,
+                                             exec_history + [{"role":"user","content":exec_ctx}])
+
+            if executor_resp.upper().startswith("DONE"):
+                summary = executor_resp[4:].lstrip(":").strip()
+                final_output = summary or output
+                break
+
+            if executor_resp.upper() == "CONTINUE":
                 continue
 
-            retries = 0
-            tool_call = self._parse_tool_call(response)
+            # Model returned a fix command
+            if callback:
+                callback("exec", json.dumps({"name":"exec","arguments":{"command":executor_resp}},ensure_ascii=False))
+            fix_out = self._exec(executor_resp)
+            if callback:
+                callback("output", fix_out)
+            exec_history.append({"role":"user","content":f"Fix: {executor_resp}\nOutput: {fix_out}"})
+            final_output = fix_out
 
-            if tool_call:
-                if callback:
-                    callback("exec", json.dumps(tool_call, ensure_ascii=False))
+        # ── Final summary ──────────────────────────────────────────────────────
+        if use_todo:
+            # Mark any remaining as done if we exited early
+            for t in self.todos:
+                if t["status"] == "in_progress":
+                    t["status"] = "completed"
+            if callback:
+                callback("todo_summary", self._todo_display())
 
-                output = self._execute_tool(tool_call)
-                final_output = output
-
-                if tool_call["name"] == "todowrite":
-                    if callback:
-                        callback("todo_update", self._todo_display())
-                else:
-                    if callback:
-                        callback("output", output)
-
-                self.messages.append({"role": "assistant", "content": response})
-                self.messages.append({
-                    "role": "user",
-                    "content": (
-                        f"[Tool result]\n{output}\n\n"
-                        "JSON ONLY: next tool call, or DONE: plain text summary if finished."
-                    )
-                })
-
-            else:
-                # Plain text → done
-                self.messages.append({"role": "assistant", "content": response})
-                final_output = response
-
-                if self.todos and callback:
-                    callback("todo_summary", self._todo_display())
-                if callback:
-                    callback("done", response)
-                return final_output
-
-            time.sleep(1.5)
-
-        if self.todos and callback:
-            callback("todo_summary", self._todo_display())
+        # Ask model for a clean summary
         if callback:
-            callback("done", final_output)
-        return final_output
+            callback("thinking", "Generating summary...")
+
+        summary_msgs = (
+            [{"role":"user","content":user_input}]
+            + exec_history[-6:]
+            + [{"role":"user","content":"Summarize what was done in 1-2 sentences."}]
+        )
+        summary = self._call_model(
+            "You are a concise technical assistant. Summarize what the agent did.",
+            summary_msgs
+        )
+        self.messages.append({"role":"assistant","content":summary})
+
+        if callback:
+            callback("done", summary)
+
+        return summary
 
     def clear(self):
         self.messages   = []
