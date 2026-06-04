@@ -1,0 +1,8 @@
+{
+  "type": "github",
+  "scopes": [
+    "repo",
+    "read:user",
+    "user:email"
+  ]
+}
