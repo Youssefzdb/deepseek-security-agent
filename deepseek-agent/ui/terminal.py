@@ -116,3 +116,29 @@ class TerminalUI:
 
     def clear(self):
         os.system("clear" if os.name != "nt" else "cls")
+
+    def todo_panel(self, todos: list):
+        """Display the current todo list in a nice panel."""
+        if not todos:
+            return
+        lines = []
+        for i, t in enumerate(todos):
+            mark  = "[green]✓[/green]" if t["done"] else "[yellow]○[/yellow]"
+            style = "dim" if t["done"] else "white"
+            lines.append(f"  {mark} [{style}][{i}] {t['item']}[/{style}]")
+        done  = sum(1 for t in todos if t["done"])
+        total = len(todos)
+        bar   = "█" * done + "░" * (total - done)
+        lines.append(f"\n  [cyan]{bar}[/cyan] [dim]{done}/{total}[/dim]")
+        self.console.print(Panel(
+            "\n".join(lines),
+            title="[bold cyan]📋 Todo List[/bold cyan]",
+            border_style="cyan", box=box.ROUNDED
+        ))
+
+    def todo_add(self, index: int, item: str):
+        self.console.print(f"  [cyan]📝 Todo #{index}:[/cyan] {item}")
+
+    def todo_done_msg(self, index: int, item: str, remaining: int):
+        status = "[green]ALL DONE ✓[/green]" if remaining == 0 else f"[dim]{remaining} remaining[/dim]"
+        self.console.print(f"  [green]✓ Done #{index}:[/green] {item} — {status}")

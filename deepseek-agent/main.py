@@ -82,15 +82,42 @@ def main():
         if action == "thinking":
             ui.thinking(detail)
         elif action == "exec":
-            ui.exec_command(detail)
+            import json as _json
+            try:
+                tc = _json.loads(detail)
+                name = tc.get("name", "")
+                args = tc.get("arguments", {})
+                if name == "todo_add":
+                    idx = len(agent.todos) - 1 if agent.todos else 0
+                    ui.todo_add(idx, args.get("item", ""))
+                elif name == "todo_done":
+                    idx = int(args.get("index", 0))
+                    item = agent.todos[idx]["item"] if idx < len(agent.todos) else ""
+                    remaining = sum(1 for t in agent.todos if not t["done"])
+                    ui.todo_done_msg(idx, item, remaining)
+                elif name == "todo_list":
+                    ui.todo_panel(agent.todos)
+                else:
+                    ui.exec_command(detail)
+            except Exception:
+                ui.exec_command(detail)
         elif action == "output":
-            ui.command_output(detail)
+            # Don't show raw output for todo operations
+            import json as _json
+            skip_names = {"todo_add", "todo_done", "todo_list"}
+            # Check last tool used
+            if agent.tools_used and agent.tools_used[-1] not in skip_names:
+                ui.command_output(detail)
         elif action == "write":
             ui.info(f"Writing: {detail}")
         elif action == "read":
             ui.info(f"Reading: {detail}")
+        elif action == "todo_summary":
+            ui.todo_panel(agent.todos)
         elif action == "done":
-            ui.agent_message(detail)
+            if agent.todos:
+                ui.todo_panel(agent.todos)
+            ui.agent_message(detail if detail != "TASK_DONE" else "✅ Task completed successfully!")
 
     if args.message:
         msg = " ".join(args.message)
