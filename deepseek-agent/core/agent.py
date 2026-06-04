@@ -30,16 +30,16 @@ TOOLS:
 Output ONLY JSON. No text. No markdown."""
 
 EXECUTOR_FEW_SHOT = [
-    {"role": "user", "content": "Execute: list files in /tmp (respond ONLY with JSON)"},
+    {"role": "user", "content": "Execute: list files in /tmp\n(respond ONLY with JSON in format: {\"name\":\"exec\",\"arguments\":{\"command\":\"CMD\"}})"},
     {"role": "assistant", "content": '{"name":"exec","arguments":{"command":"ls -la /tmp"}}'},
-    {"role": "user", "content": "Execute: create file /tmp/hello.txt with content: hello world (respond ONLY with JSON)"},
-    {"role": "assistant", "content": '{"name":"write_file","arguments":{"path":"/tmp/hello.txt","content":"hello world"}}'},
-    {"role": "user", "content": "Execute: show current user and hostname (respond ONLY with JSON)"},
+    {"role": "user", "content": "Execute: create directory /tmp/myproject\n(respond ONLY with JSON in format: {\"name\":\"exec\",\"arguments\":{\"command\":\"CMD\"}})"},
+    {"role": "assistant", "content": '{"name":"exec","arguments":{"command":"mkdir -p /tmp/myproject"}}'},
+    {"role": "user", "content": "Execute: create file /tmp/hello.py with content: print(\'hello\')\n(respond ONLY with JSON in format: {\"name\":\"write_file\",\"arguments\":{\"path\":\"PATH\",\"content\":\"CONTENT\"}})"},
+    {"role": "assistant", "content": '{"name":"write_file","arguments":{"path":"/tmp/hello.py","content":"print(\'hello\')"}}'},
+    {"role": "user", "content": "Execute: run python3 /tmp/hello.py\n(respond ONLY with JSON in format: {\"name\":\"exec\",\"arguments\":{\"command\":\"CMD\"}})"},
+    {"role": "assistant", "content": '{"name":"exec","arguments":{"command":"python3 /tmp/hello.py"}}'},
+    {"role": "user", "content": "Execute: show current user and hostname\n(respond ONLY with JSON in format: {\"name\":\"exec\",\"arguments\":{\"command\":\"CMD\"}})"},
     {"role": "assistant", "content": '{"name":"exec","arguments":{"command":"whoami && hostname"}}'},
-    {"role": "user", "content": "Execute: check if nginx is running (respond ONLY with JSON)"},
-    {"role": "assistant", "content": '{"name":"exec","arguments":{"command":"systemctl status nginx 2>/dev/null || service nginx status 2>/dev/null || echo not running"}}'},
-    {"role": "user", "content": "Execute: read the file /etc/os-release (respond ONLY with JSON)"},
-    {"role": "assistant", "content": '{"name":"read_file","arguments":{"path":"/etc/os-release"}}'},
 ]
 
 
@@ -107,13 +107,23 @@ class Agent:
         pending = sum(1 for t in self.todos if not t["done"])
         return f"[TODO #{index} ✓ — {pending} remaining]"
 
+    def _display_item(self, item: str) -> str:
+        """Clean item for display — strip internal prefixes."""
+        if item.startswith("EXEC:"):
+            return "$ " + item[5:].split("\n")[0][:80]
+        if item.startswith("WRITE_FILE:") and ":CONTENT:" in item:
+            path = item.split("WRITE_FILE:")[1].split(":CONTENT:")[0]
+            return f"write {path}"
+        return item[:80]
+
     def todo_list(self):
         if not self.todos:
             return "[No todos]"
         lines = []
         for i, t in enumerate(self.todos):
-            mark = "✓" if t["done"] else "○"
-            lines.append(f"  {mark} [{i}] {t['item']}")
+            mark    = "✓" if t["done"] else "○"
+            display = self._display_item(t["item"])
+            lines.append(f"  {mark} [{i}] {display}")
         done = sum(1 for t in self.todos if t["done"])
         lines.append(f"\n  {done}/{len(self.todos)} done")
         return "\n".join(lines)
@@ -135,20 +145,41 @@ class Agent:
 
         def normalize(d):
             if not isinstance(d, dict): return None
+            # Canonical: {name, arguments}
             if "name" in d and "arguments" in d:
                 d["name"] = _map(d["name"]); return d
+            # {tool_calls: [...]}
             if "tool_calls" in d:
                 calls = d["tool_calls"]
                 if isinstance(calls, list) and calls:
                     tc = calls[0]
                     return {"name": _map(tc.get("name","")),
                             "arguments": tc.get("arguments", tc.get("parameters", {}))}
+            # {function, parameters}
             if "function" in d:
                 return {"name": _map(d["function"]),
                         "arguments": d.get("parameters", d.get("arguments", {}))}
+            # {name, parameters} or {name, args}
             if "name" in d:
                 return {"name": _map(d["name"]),
-                        "arguments": d.get("parameters", d.get("args", {}))}
+                        "arguments": d.get("parameters", d.get("args", d.get("arguments", {})))}
+            # {tool, ...} — DeepSeek variant: convert to exec
+            if "tool" in d:
+                tool_name = _map(d["tool"])
+                # Build exec command from remaining keys
+                rest = {k: v for k, v in d.items() if k != "tool"}
+                if tool_name in ("exec", "bash", "shell", "run"):
+                    cmd = rest.get("command", rest.get("cmd", rest.get("script", "")))
+                    return {"name": "exec", "arguments": {"command": cmd}}
+                # file tools: path + content
+                if tool_name in ("write_file", "create_file"):
+                    return {"name": "write_file",
+                            "arguments": {"path": rest.get("path",""), "content": rest.get("content","")}}
+                if tool_name in ("read_file", "open_file"):
+                    return {"name": "read_file", "arguments": {"path": rest.get("path","")}}
+                # Anything else: try to build exec from tool name + path
+                cmd = f"{tool_name} {' '.join(str(v) for v in rest.values())}"
+                return {"name": "exec", "arguments": {"command": cmd}}
             return None
 
         def fix(tool):
@@ -228,19 +259,33 @@ class Agent:
             try:
                 steps = json.loads(resp[start:end])
                 if isinstance(steps, list) and steps:
-                    # Normalize: handle both ["step"] and [{"step":"..."}] formats
+                    # Normalize: handle both ["step"] and [{"step":"...","command":"..."}] formats
                     normalized = []
                     for s in steps:
                         if isinstance(s, str):
                             normalized.append(s)
                         elif isinstance(s, dict):
-                            # Try common keys
-                            for key in ["step", "description", "action", "task", "item", "name"]:
-                                if key in s:
-                                    normalized.append(str(s[key]))
-                                    break
+                            # Rich step object — convert to executable step description
+                            action    = s.get("action", "")
+                            step_desc = s.get("step") or s.get("description") or s.get("task") or s.get("item") or s.get("name", "")
+                            command   = s.get("command") or s.get("cmd") or s.get("shell") or s.get("run") or ""
+                            filepath  = s.get("filepath") or s.get("path") or s.get("file") or ""
+                            file_content = s.get("content") or ""
+
+                            # write_file action
+                            if action in ("write_file", "create_file", "write") and filepath and file_content:
+                                normalized.append(f"WRITE_FILE:{filepath}:CONTENT:{file_content}")
+                            # run_command / exec action
+                            elif action in ("run_command", "exec", "execute", "shell", "bash") and command:
+                                normalized.append(f"EXEC:{command}")
+                            # has both step + command
+                            elif step_desc and command:
+                                normalized.append(f"EXEC:{command}")
+                            elif step_desc:
+                                normalized.append(str(step_desc))
+                            elif command:
+                                normalized.append(f"EXEC:{command}")
                             else:
-                                # Join all values
                                 normalized.append(": ".join(str(v) for v in s.values() if v))
                     if normalized:
                         if callback: callback("planning", f"Plan: {len(normalized)} steps")
@@ -252,11 +297,29 @@ class Agent:
 
     # ── Execute one step ───────────────────────────────────────────────────
     def execute_step(self, step: str, context: str = "", callback=None) -> str:
-        """Execute a single step with up to 5 retries."""
-        ctx_note = f"\n\nContext from previous steps:\n{context[-1000:]}" if context else ""
+        """Execute a single step — handles pre-parsed EXEC/WRITE_FILE steps directly."""
+        # Fast-path: step already parsed by planner
+        if step.startswith("EXEC:"):
+            command = step[5:]
+            if callback: callback("exec", json.dumps({"name":"exec","arguments":{"command":command}}))
+            out = self.exec_command(command)
+            if callback: callback("output", out)
+            return out
+        if step.startswith("WRITE_FILE:") and ":CONTENT:" in step:
+            _, rest  = step.split("WRITE_FILE:", 1)
+            path, file_content = rest.split(":CONTENT:", 1)
+            if callback: callback("exec", json.dumps({"name":"write_file","arguments":{"path":path,"content":file_content[:50]+"..."}}))
+            out = self.write_file(path, file_content)
+            if callback: callback("output", out)
+            return out
+
+        # LLM path: ask executor model
+        ctx_note = f"\n\nContext from previous steps:\n{context[-800:]}" if context else ""
         user_msg = (
             f"Execute this specific step: {step}{ctx_note}\n\n"
-            "(respond ONLY with JSON tool call, no text)"
+            "(respond ONLY with JSON. Use: {\"name\":\"exec\",\"arguments\":{\"command\":\"CMD\"}} "
+            "or {\"name\":\"write_file\",\"arguments\":{\"path\":\"PATH\",\"content\":\"CONTENT\"}} "
+            "or {\"name\":\"read_file\",\"arguments\":{\"path\":\"PATH\"}})"
         )
         messages = [{"role": "system", "content": EXECUTOR_PROMPT}] + EXECUTOR_FEW_SHOT
         messages.append({"role": "user", "content": user_msg})
@@ -293,8 +356,12 @@ class Agent:
         self.todos = []
 
         # Decide if task is simple (1 action) or complex (multi-step)
-        simple_keywords = ["whoami","hostname","ls","pwd","ps","df","uname","echo","cat ","id "]
-        is_simple = len(user_input.split()) < 6 or any(k in user_input.lower() for k in simple_keywords)
+        # Simple: very short task (< 5 words) with no connectors like "then", "and", "step"
+        complex_indicators = ["then", "and then", "step", "steps", "create", "install",
+                               "build", "setup", "configure", "deploy", "generate", "write"]
+        word_count = len(user_input.split())
+        has_complex = any(k in user_input.lower() for k in complex_indicators)
+        is_simple   = word_count < 5 or (word_count < 8 and not has_complex)
 
         if is_simple:
             # Run directly without planning
