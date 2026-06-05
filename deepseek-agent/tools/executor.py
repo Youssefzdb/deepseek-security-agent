@@ -1,57 +1,86 @@
 #!/usr/bin/env python3
-"""Execute any shell command — no restrictions."""
-import subprocess, os, time, signal
+"""
+Executor — robust shell command runner.
+Supports: sync, background, timeout, Termux auto-detect, history.
+"""
+import subprocess, os, time, shutil
 from pathlib import Path
 
 
 class Executor:
-    def __init__(self, cwd=None, timeout=120):
-        self.cwd = cwd or os.getcwd()
-        self.timeout = timeout
+    def __init__(self, cwd: str | None = None, timeout: int = 120):
+        self.cwd       = cwd or os.getcwd()
+        self.timeout   = timeout
         self.is_termux = self._detect_termux()
-        self.history = []
+        self.history: list[dict] = []
 
-    def _detect_termux(self):
-        return os.path.exists("/data/data/com.termux") or "TERMUX_VERSION" in os.environ
+    # ── Environment ───────────────────────────────────────────────────────────
+    def _detect_termux(self) -> bool:
+        return (
+            os.path.exists("/data/data/com.termux")
+            or "TERMUX_VERSION" in os.environ
+        )
 
-    def run(self, command, timeout=None):
-        """Execute command, return (stdout+stderr, returncode)."""
-        timeout = timeout or self.timeout
+    def _env(self) -> dict:
+        env = os.environ.copy()
+        if self.is_termux:
+            env["PATH"] = (
+                "/data/data/com.termux/files/usr/bin:" + env.get("PATH", "")
+            )
+        return env
+
+    # ── Sync run ──────────────────────────────────────────────────────────────
+    def run(self, command: str, timeout: int | None = None) -> tuple[str, int]:
+        """
+        Execute command synchronously.
+        Returns (output_str, returncode).
+        """
+        t = timeout or self.timeout
         self.history.append({"command": command, "time": time.time()})
         try:
-            env = os.environ.copy()
-            if self.is_termux:
-                env["PATH"] = "/data/data/com.termux/files/usr/bin:" + env.get("PATH", "")
-
-            result = subprocess.run(
-                command, shell=True, capture_output=True, text=True,
-                timeout=timeout, cwd=self.cwd, env=env
+            r = subprocess.run(
+                command, shell=True, capture_output=True,
+                text=True, timeout=t, cwd=self.cwd, env=self._env()
             )
-            output = result.stdout + result.stderr
-            return output[:10000] if output else f"Exit code: {result.returncode}", result.returncode
+            out = (r.stdout + r.stderr).strip()
+            return (out[:12000] if out else f"[exit {r.returncode}]"), r.returncode
         except subprocess.TimeoutExpired:
-            return f"Timed out after {timeout}s", -1
+            return f"[Timeout >{t}s]", -1
         except Exception as e:
-            return f"Error: {e}", -1
+            return f"[Error: {e}]", -1
 
-    def run_background(self, command):
-        """Run command in background, return PID."""
+    # ── Background run ────────────────────────────────────────────────────────
+    def run_background(self, command: str) -> int | str:
+        """Run command in background. Returns PID or error string."""
         try:
             proc = subprocess.Popen(
-                command, shell=True, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, cwd=self.cwd
+                command, shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=self.cwd, env=self._env()
             )
             return proc.pid
         except Exception as e:
-            return f"Error: {e}"
+            return f"[Error: {e}]"
 
-    def install_if_missing(self, tool):
-        """Auto-install missing tool."""
-        check, _ = self.run(f"which {tool}", timeout=10)
-        if "not found" in check or check.strip() == "":
-            if self.is_termux:
-                self.run(f"pkg install -y {tool}", timeout=120)
-            else:
-                self.run(f"apt-get install -y {tool}", timeout=120)
-            return True
-        return False
+    # ── Tool availability ─────────────────────────────────────────────────────
+    def is_available(self, tool: str) -> bool:
+        """Check if a tool exists on PATH."""
+        return shutil.which(tool) is not None
+
+    def install_if_missing(self, tool: str) -> bool:
+        """Auto-install missing tool via pkg (Termux) or apt."""
+        if self.is_available(tool):
+            return False
+        if self.is_termux:
+            self.run(f"pkg install -y {tool}", timeout=180)
+        else:
+            self.run(f"apt-get install -y {tool}", timeout=180)
+        return True
+
+    # ── History ───────────────────────────────────────────────────────────────
+    def last(self, n: int = 5) -> list[dict]:
+        return self.history[-n:]
+
+    def clear_history(self):
+        self.history.clear()
