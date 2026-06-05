@@ -1,135 +1,138 @@
 #!/usr/bin/env python3
 """
-DeepSeek Security Agent — Autonomous terminal agent for security testing.
-Usage: python main.py [--email EMAIL] [--password PASS] [--model MODEL] [--tor]
+DeepSeek Security Agent — Autonomous terminal agent.
+Usage: python main.py [--email EMAIL] [--password PASS] [--model MODEL]
 """
 import argparse, json, os, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.client import DeepSeekClient
-from core.agent import Agent
-from ui.terminal import TerminalUI
-from tools.executor import Executor
+from core.client  import DeepSeekClient
+from core.agent   import Agent
+from ui.terminal  import TerminalUI
 from tools.predefined import PredefinedTools
+
+
+TOOLS = [
+    ("exec",          "Execute any shell command"),
+    ("nmap",          "Network scanning"),
+    ("gobuster",      "Directory / DNS brute-force"),
+    ("nikto",         "Web vulnerability scanner"),
+    ("sqlmap",        "SQL injection"),
+    ("subfinder",     "Subdomain enumeration"),
+    ("whatweb",       "Web technology detection"),
+    ("curl",          "HTTP requests"),
+    ("dig",           "DNS queries"),
+    ("whois",         "Domain info"),
+    ("ping",          "Connectivity test"),
+    ("read/write",    "File operations"),
+]
+
+
+def build_callback(agent: Agent, ui: TerminalUI):
+    """Build the agent callback that drives the UI."""
+    import json as _json
+
+    def cb(action: str, detail: str):
+        if action == "thinking":
+            ui.thinking(detail)
+
+        elif action == "exec":
+            try:
+                tc  = _json.loads(detail)
+                cmd = tc.get("arguments", {}).get("command", detail)
+            except Exception:
+                cmd = detail
+            ui.exec_command(cmd)
+
+        elif action == "output":
+            ui.command_output(detail)
+
+        elif action == "write":
+            ui.file_write(detail)
+
+        elif action == "read":
+            ui.file_read(detail)
+
+        elif action == "todo_update":
+            ui.todo_panel(agent.todos)
+
+        elif action == "todo_summary":
+            ui.todo_panel(agent.todos)
+            ui.rule()
+
+        elif action == "done":
+            text = detail if detail and detail != "TASK_DONE" else "✅ Done."
+            ui.agent_message(text)
+
+    return cb
 
 
 def main():
     parser = argparse.ArgumentParser(description="DeepSeek Security Agent")
-    parser.add_argument("--email", default=None, help="DeepSeek email (or DEEPSEEK_EMAIL env)")
-    parser.add_argument("--password", default=None, help="DeepSeek password (or DEEPSEEK_PASSWORD env)")
-    parser.add_argument("--config", default=None, help="JSON config file with email/password")
-    parser.add_argument("--model", default="deepseek-v3", help="Model: deepseek-v3, deepseek-r1, deepseek-coder")
-    parser.add_argument("--tor", action="store_true", help="Use Tor proxy")
-    parser.add_argument("--proxy", default=None, help="SOCKS5 proxy (socks5://127.0.0.1:9050)")
-    parser.add_argument("--max-rounds", type=int, default=20, help="Max agent rounds per task")
-    parser.add_argument("--message", nargs="*", help="Single message (non-interactive)")
-    parser.add_argument("--no-color", action="store_true", help="Disable colors")
+    parser.add_argument("--email",      default=None)
+    parser.add_argument("--password",   default=None)
+    parser.add_argument("--config",     default=None, help="JSON config {email, password}")
+    parser.add_argument("--model",      default="deepseek-coder",
+                        help="deepseek-coder | deepseek-v3 | deepseek-r1")
+    parser.add_argument("--tor",        action="store_true")
+    parser.add_argument("--proxy",      default=None)
+    parser.add_argument("--max-rounds", type=int, default=20)
+    parser.add_argument("--message",    nargs="*", help="One-shot mode")
+    parser.add_argument("--no-color",   action="store_true")
     args = parser.parse_args()
 
-    ui = TerminalUI()
+    ui = TerminalUI(model=args.model)
 
-    email = args.email or os.environ.get("DEEPSEEK_EMAIL")
+    # ── Credentials ───────────────────────────────────────────────────────────
+    email    = args.email    or os.environ.get("DEEPSEEK_EMAIL")
     password = args.password or os.environ.get("DEEPSEEK_PASSWORD")
 
     if args.config and os.path.exists(args.config):
         try:
-            with open(args.config) as f:
-                cfg = json.load(f)
-            email = email or cfg.get("email")
+            cfg      = json.loads(Path(args.config).read_text())
+            email    = email    or cfg.get("email")
             password = password or cfg.get("password")
         except Exception:
             pass
 
     if not email or not password:
-        ui.error("Email and password required. Use --email/--password, env vars, or --config")
+        ui.error("Email and password required.\n"
+                 "Use --email/--password, env DEEPSEEK_EMAIL/DEEPSEEK_PASSWORD, or --config.")
         sys.exit(1)
 
+    # ── Proxy ─────────────────────────────────────────────────────────────────
     proxies = None
     if args.proxy:
         proxies = {"http": args.proxy, "https": args.proxy}
     elif args.tor:
         proxies = {"http": "socks5://127.0.0.1:9050", "https": "socks5://127.0.0.1:9050"}
 
-    ui.info("Connecting to DeepSeek...")
+    # ── Connect ───────────────────────────────────────────────────────────────
+    ui.info("Connecting to DeepSeek…")
     try:
         client = DeepSeekClient(email, password, proxies=proxies)
     except Exception as e:
         ui.error(f"Connection failed: {e}")
         sys.exit(1)
 
-    ui.success(f"Connected as {email}")
+    ui.success(f"Connected  ·  {email}")
 
-    agent = Agent(client, model=args.model, max_rounds=args.max_rounds)
+    agent    = Agent(client, model=args.model, max_rounds=args.max_rounds)
+    callback = build_callback(agent, ui)
 
-    tools = [
-        ("exec", "Execute any shell command"),
-        ("nmap", "Network scanning"),
-        ("gobuster", "Directory/DNS brute-force"),
-        ("nikto", "Web vulnerability scanner"),
-        ("sqlmap", "SQL injection"),
-        ("subfinder", "Subdomain enumeration"),
-        ("whatweb", "Web technology detection"),
-        ("curl", "HTTP requests"),
-        ("dig", "DNS queries"),
-        ("whois", "Domain information"),
-        ("ping", "Connectivity test"),
-        ("read/write/edit", "File operations"),
-    ]
-
-    def agent_callback(action, detail):
-        if action == "thinking":
-            ui.thinking(detail)
-        elif action == "exec":
-            import json as _json
-            try:
-                tc = _json.loads(detail)
-                name = tc.get("name", "")
-                args = tc.get("arguments", {})
-                if name == "todo_add":
-                    idx = len(agent.todos) - 1 if agent.todos else 0
-                    ui.todo_add(idx, args.get("item", ""))
-                elif name == "todo_done":
-                    idx = int(args.get("index", 0))
-                    item = agent.todos[idx]["item"] if idx < len(agent.todos) else ""
-                    remaining = sum(1 for t in agent.todos if not t["done"])
-                    ui.todo_done_msg(idx, item, remaining)
-                elif name == "todo_list":
-                    ui.todo_panel(agent.todos)
-                else:
-                    ui.exec_command(detail)
-            except Exception:
-                ui.exec_command(detail)
-        elif action == "output":
-            # Don't show raw output for todo operations
-            import json as _json
-            skip_names = {"todo_add", "todo_done", "todo_list"}
-            # Check last tool used
-            if agent.tools_used and agent.tools_used[-1] not in skip_names:
-                ui.command_output(detail)
-        elif action == "write":
-            ui.info(f"Writing: {detail}")
-        elif action == "read":
-            ui.info(f"Reading: {detail}")
-        elif action == "todo_summary":
-            ui.todo_panel(agent.todos)
-        elif action == "done":
-            if agent.todos:
-                ui.todo_panel(agent.todos)
-            ui.agent_message(detail if detail != "TASK_DONE" else "✅ Task completed successfully!")
-
+    # ── One-shot mode ─────────────────────────────────────────────────────────
     if args.message:
         msg = " ".join(args.message)
         ui.user_message(msg)
-        result = agent.run(msg, callback=agent_callback)
-        ui.agent_message(result)
+        agent.run(msg, callback=callback)
         return
 
+    # ── Interactive mode ──────────────────────────────────────────────────────
     ui.banner()
-    ui.info(f"Model: {args.model} | Max rounds: {args.max_rounds}")
-    ui.info("Type /help for commands, /exit to quit")
-    ui.tools_list(tools)
+    ui.info(f"Model: [bold]{args.model}[/bold]  ·  max-rounds: {args.max_rounds}")
+    ui.tools_list(TOOLS)
 
     msg_count = 0
     while True:
@@ -142,65 +145,68 @@ def main():
         if not user_input:
             continue
 
+        # ── Slash commands ─────────────────────────────────────────────────────
         if user_input == "/exit":
             break
+
         elif user_input == "/help":
             ui.help()
-            continue
+
         elif user_input == "/clear":
-            agent.messages.clear()
+            agent.clear()
             ui.success("History cleared")
-            continue
+
         elif user_input == "/new":
-            agent.messages.clear()
+            agent.clear()
             try:
                 client.create_session()
                 ui.success("New session created")
             except Exception as e:
                 ui.error(f"Session error: {e}")
-            continue
+
         elif user_input == "/tools":
-            ui.tools_list(tools)
-            continue
+            ui.tools_list(TOOLS)
+
         elif user_input.startswith("/model "):
-            model = user_input.split(maxsplit=1)[1]
-            agent.model = model
-            ui.success(f"Model: {model}")
-            continue
+            m = user_input.split(maxsplit=1)[1].strip()
+            agent.model = m
+            ui.model    = m
+            ui.success(f"Model switched → {m}")
+
         elif user_input.startswith("/save "):
-            path = user_input.split(maxsplit=1)[1]
+            path = user_input.split(maxsplit=1)[1].strip()
             try:
                 Path(path).write_text(json.dumps(agent.messages, indent=2))
-                ui.success(f"Saved to {path}")
+                ui.success(f"Saved → {path}")
             except Exception as e:
                 ui.error(f"Save error: {e}")
-            continue
+
         elif user_input.startswith("/load "):
-            path = user_input.split(maxsplit=1)[1]
+            path = user_input.split(maxsplit=1)[1].strip()
             try:
                 agent.messages = json.loads(Path(path).read_text())
-                ui.success(f"Loaded from {path}")
+                ui.success(f"Loaded ← {path}")
             except Exception as e:
                 ui.error(f"Load error: {e}")
-            continue
+
         elif user_input == "/history":
-            for h in client.http.session.cookies:
-                ui.info(str(h))
-            continue
+            for i, m in enumerate(agent.messages[-10:]):
+                role = m.get("role", "?")
+                txt  = m.get("content", "")[:80]
+                ui.info(f"[{i}] {role}: {txt}")
 
-        ui.user_message(user_input)
-        msg_count += 1
+        # ── Task ──────────────────────────────────────────────────────────────
+        else:
+            ui.user_message(user_input)
+            msg_count += 1
+            try:
+                agent.run(user_input, callback=callback)
+            except KeyboardInterrupt:
+                ui.warn("Interrupted")
+            except Exception as e:
+                ui.error(f"Agent error: {e}")
 
-        try:
-            result = agent.run(user_input, callback=agent_callback)
-            if result:
-                ui.agent_message(result)
-        except KeyboardInterrupt:
-            ui.info("Interrupted")
-        except Exception as e:
-            ui.error(f"Error: {e}")
-
-    ui.info("Goodbye!")
+    ui.info("Goodbye 👋")
 
 
 if __name__ == "__main__":
