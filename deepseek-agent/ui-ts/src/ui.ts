@@ -1,3 +1,5 @@
+import { showLogin } from "./login.js";
+
 /**
  * ui.ts — Terminal UI logic (runs in Electron renderer / Vite dev)
  *
@@ -254,5 +256,21 @@ inp.addEventListener("keydown", (e) => {
 });
 
 // Focus input on click anywhere
-document.addEventListener("click", () => inp.focus());
-inp.focus();
+document.addEventListener("click", () => { if (!document.getElementById("login-overlay")) inp.focus(); });
+// ── Boot — show login first, then init ───────────────────────────────────────
+showLogin((email, password) => {
+  // Store credentials so bridge.py can use them
+  if (window.agent) {
+    window.agent.send(JSON.stringify({ id: "__creds__", message: "__SET_CREDS__", email, password }));
+  }
+  // Reveal UI
+  document.getElementById("app")!.style.opacity = "1";
+  inp.focus();
+});
+
+// Hide app until login succeeds
+document.addEventListener("DOMContentLoaded", () => {
+  const app = document.getElementById("app");
+  if (app) app.style.opacity = "0";
+});
+
