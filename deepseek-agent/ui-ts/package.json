@@ -1,23 +1,28 @@
 {
   "name": "deepseek-agent-ui",
-  "version": "1.0.0",
-  "type": "module",
-  "bin": { "deepseek-ui": "./dist/index.js" },
+  "version": "2.0.0",
+  "description": "DeepSeek Security Agent — Electron terminal with Three.js 3D mask",
+  "type": "commonjs",
+  "main": "electron/main.js",
   "scripts": {
-    "build": "tsc",
-    "dev": "tsx src/index.tsx",
-    "start": "node dist/index.js"
+    "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "build": "tsc -p tsconfig.vite.json && vite build && tsc -p tsconfig.electron.json",
+    "start": "electron .",
+    "preview": "vite preview"
   },
   "dependencies": {
-    "ink": "^5.0.1",
-    "ink-spinner": "^5.0.0",
-    "react": "^18.2.0",
-    "chalk": "^5.3.0"
+    "three": "^0.165.0",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0"
   },
   "devDependencies": {
-    "@types/react": "^18.2.0",
     "@types/node": "^20.0.0",
-    "typescript": "^5.4.0",
-    "tsx": "^4.7.0"
+    "@types/three": "^0.165.0",
+    "concurrently": "^8.2.0",
+    "electron": "^30.0.0",
+    "typescript": "^6.0.3",
+    "vite": "^5.2.0",
+    "vite-plugin-electron": "^0.28.0",
+    "wait-on": "^7.2.0"
   }
 }
