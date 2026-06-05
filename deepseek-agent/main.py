@@ -8,30 +8,59 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.client  import DeepSeekClient
-from core.agent   import Agent
-from ui.terminal  import TerminalUI
+from core.client      import DeepSeekClient
+from core.agent       import Agent
+from ui.terminal      import TerminalUI
+from tools.executor   import Executor
 from tools.predefined import PredefinedTools
 
 
+# ── All available tools (27 + exec + file ops) ────────────────────────────────
 TOOLS = [
-    ("exec",          "Execute any shell command"),
-    ("nmap",          "Network scanning"),
-    ("gobuster",      "Directory / DNS brute-force"),
-    ("nikto",         "Web vulnerability scanner"),
-    ("sqlmap",        "SQL injection"),
-    ("subfinder",     "Subdomain enumeration"),
-    ("whatweb",       "Web technology detection"),
-    ("curl",          "HTTP requests"),
-    ("dig",           "DNS queries"),
-    ("whois",         "Domain info"),
-    ("ping",          "Connectivity test"),
-    ("read/write",    "File operations"),
+    # Network recon
+    ("nmap",           "Port scan & service detection"),
+    ("ping",           "Connectivity test"),
+    ("traceroute",     "Route tracing"),
+    ("whois",          "Domain / IP info"),
+    ("dig",            "DNS queries"),
+    ("curl",           "HTTP requests & headers"),
+    ("nc_banner",      "TCP banner grab"),
+    # Web recon
+    ("whatweb",        "Web technology fingerprint"),
+    ("nikto",          "Web vulnerability scanner"),
+    ("wpscan",         "WordPress scanner"),
+    # Dir / DNS brute-force
+    ("gobuster_dir",   "Web directory brute-force"),
+    ("gobuster_dns",   "DNS subdomain brute-force"),
+    ("dirb",           "Alternative dir brute-force"),
+    ("ffuf",           "Fast web fuzzer"),
+    # Subdomain enumeration
+    ("subfinder",      "Subdomain enumeration"),
+    ("amass",          "Advanced subdomain enum"),
+    # OSINT
+    ("theHarvester",   "Email / host OSINT"),
+    ("shodan_cli",     "Shodan search"),
+    # Exploitation
+    ("sqlmap",         "SQL injection"),
+    ("hydra",          "Credential brute-force"),
+    ("metasploit_run", "Run Metasploit resource file"),
+    # SMB / AD
+    ("enum4linux",     "SMB enumeration"),
+    ("smbclient",      "SMB client access"),
+    # Password cracking
+    ("hash_identify",  "Hash type identification"),
+    ("john",           "John the Ripper"),
+    ("hashcat",        "GPU hash cracker"),
+    # Built-in
+    ("exec",           "Execute any shell command"),
+    ("read_file",      "Read file contents"),
+    ("write_file",     "Write / create file"),
+    ("edit_file",      "Patch file (old → new)"),
 ]
 
 
 def build_callback(agent: Agent, ui: TerminalUI):
-    """Build the agent callback that drives the UI."""
+    """Wire agent events → UI rendering."""
     import json as _json
 
     def cb(action: str, detail: str):
@@ -70,17 +99,20 @@ def build_callback(agent: Agent, ui: TerminalUI):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DeepSeek Security Agent")
-    parser.add_argument("--email",      default=None)
-    parser.add_argument("--password",   default=None)
-    parser.add_argument("--config",     default=None, help="JSON config {email, password}")
+    parser = argparse.ArgumentParser(
+        description="DeepSeek Security Agent",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument("--email",      default=None,  help="DeepSeek account email")
+    parser.add_argument("--password",   default=None,  help="DeepSeek account password")
+    parser.add_argument("--config",     default=None,  help="JSON config file {email, password}")
     parser.add_argument("--model",      default="deepseek-coder",
-                        help="deepseek-coder | deepseek-v3 | deepseek-r1")
-    parser.add_argument("--tor",        action="store_true")
-    parser.add_argument("--proxy",      default=None)
-    parser.add_argument("--max-rounds", type=int, default=20)
-    parser.add_argument("--message",    nargs="*", help="One-shot mode")
-    parser.add_argument("--no-color",   action="store_true")
+                        help="deepseek-coder (default) | deepseek-v3 | deepseek-r1")
+    parser.add_argument("--max-rounds", default=40,    type=int,
+                        help="Max executor rounds per task (default: 40)")
+    parser.add_argument("--tor",        action="store_true", help="Route through Tor (socks5://127.0.0.1:9050)")
+    parser.add_argument("--proxy",      default=None,  help="HTTP/SOCKS proxy URL")
+    parser.add_argument("-m", "--message", nargs="+",  help="One-shot message (non-interactive)")
     args = parser.parse_args()
 
     ui = TerminalUI(model=args.model)
@@ -98,11 +130,14 @@ def main():
             pass
 
     if not email or not password:
-        ui.error("Email and password required.\n"
-                 "Use --email/--password, env DEEPSEEK_EMAIL/DEEPSEEK_PASSWORD, or --config.")
+        ui.error(
+            "Credentials required.\n"
+            "Use --email/--password, env vars DEEPSEEK_EMAIL / DEEPSEEK_PASSWORD,\n"
+            "or --config path/to/config.json"
+        )
         sys.exit(1)
 
-    # ── Proxy ─────────────────────────────────────────────────────────────────
+    # ── Proxy / Tor ───────────────────────────────────────────────────────────
     proxies = None
     if args.proxy:
         proxies = {"http": args.proxy, "https": args.proxy}
@@ -131,7 +166,7 @@ def main():
 
     # ── Interactive mode ──────────────────────────────────────────────────────
     ui.banner()
-    ui.info(f"Model: [bold]{args.model}[/bold]  ·  max-rounds: {args.max_rounds}")
+    ui.info(f"Model: [bold]{args.model}[/bold]  ·  max-rounds: {args.max_rounds}  ·  {len(TOOLS)} tools loaded")
     ui.tools_list(TOOLS)
 
     msg_count = 0
@@ -145,33 +180,35 @@ def main():
         if not user_input:
             continue
 
+        cmd = user_input.lower().strip()
+
         # ── Slash commands ─────────────────────────────────────────────────────
-        if user_input == "/exit":
+        if cmd == "/exit" or cmd == "/quit":
             break
 
-        elif user_input == "/help":
+        elif cmd == "/help":
             ui.help()
 
-        elif user_input == "/clear":
+        elif cmd == "/clear":
             agent.clear()
-            ui.success("History cleared")
+            ui.success("Conversation history cleared")
 
-        elif user_input == "/new":
+        elif cmd == "/new":
             agent.clear()
             try:
                 client.create_session()
-                ui.success("New session created")
+                ui.success("New chat session created")
             except Exception as e:
                 ui.error(f"Session error: {e}")
 
-        elif user_input == "/tools":
+        elif cmd == "/tools":
             ui.tools_list(TOOLS)
 
         elif user_input.startswith("/model "):
             m = user_input.split(maxsplit=1)[1].strip()
             agent.model = m
             ui.model    = m
-            ui.success(f"Model switched → {m}")
+            ui.success(f"Model → {m}")
 
         elif user_input.startswith("/save "):
             path = user_input.split(maxsplit=1)[1].strip()
@@ -189,11 +226,20 @@ def main():
             except Exception as e:
                 ui.error(f"Load error: {e}")
 
-        elif user_input == "/history":
-            for i, m in enumerate(agent.messages[-10:]):
+        elif cmd == "/history":
+            msgs = agent.messages[-10:]
+            if not msgs:
+                ui.info("No history yet.")
+            for i, m in enumerate(msgs):
                 role = m.get("role", "?")
-                txt  = m.get("content", "")[:80]
+                txt  = str(m.get("content", ""))[:100]
                 ui.info(f"[{i}] {role}: {txt}")
+
+        elif cmd == "/status":
+            ui.info(f"Model     : {agent.model}")
+            ui.info(f"Messages  : {len(agent.messages)}")
+            ui.info(f"Todos     : {len(agent.todos)}")
+            ui.info(f"Tools used: {', '.join(agent.tools_used[-5:]) or 'none'}")
 
         # ── Task ──────────────────────────────────────────────────────────────
         else:
@@ -202,7 +248,7 @@ def main():
             try:
                 agent.run(user_input, callback=callback)
             except KeyboardInterrupt:
-                ui.warn("Interrupted")
+                ui.warn("Interrupted — Ctrl+C again to exit")
             except Exception as e:
                 ui.error(f"Agent error: {e}")
 
