@@ -1,2 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.env
+.venv/
+venv/
+
+# Compiled C
+*.o
+*.so
+deepseek_hash.so
+
+# Session / temp files
+.session.json
+agent_test.txt
+*.log
+*.tmp
+
+# Node / Electron
 ui-ts/node_modules/
 ui-ts/dist/
+ui-ts/.vite/
+
+# OS
+.DS_Store
+Thumbs.db
