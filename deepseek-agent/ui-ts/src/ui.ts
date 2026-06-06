@@ -18,26 +18,24 @@ interface TodoItem {
   status:  "pending" | "in_progress" | "completed" | "cancelled";
 }
 
-// ── DOM refs ─────────────────────────────────────────────────────────────────
-const msgs      = document.getElementById("msgs")!;
-const inp       = document.getElementById("inp") as HTMLInputElement;
-const think     = document.getElementById("think")!;
-const sbModel   = document.getElementById("sb-model")!;
-const sbStatus  = document.getElementById("sb-status")!;
-const sbCount   = document.getElementById("sb-count")!;
-const sbSpin    = document.getElementById("sb-spin")!;
-const todo      = document.getElementById("todo")!;
-const toFill    = document.getElementById("to-fill")!;
-const toItems   = document.getElementById("to-items")!;
-const badgeModel = document.getElementById("badge-model")!;
+// ── DOM refs ──────────────────────────────────────────────────────────────────
+const msgs       = document.getElementById("msgs")!;
+const inp        = document.getElementById("inp") as HTMLInputElement;
+const think      = document.getElementById("think")!;
+const sbModel    = document.getElementById("sb-model")!;
+const sbStatus   = document.getElementById("sb-status")!;
+const sbCount    = document.getElementById("sb-count")!;
+const sbSpin     = document.getElementById("sb-spin")!;
+const todo       = document.getElementById("todo")!;
+const toFill     = document.getElementById("to-fill")!;
+const toItems    = document.getElementById("to-items")!;
 
-// ── State ────────────────────────────────────────────────────────────────────
-let msgCount = 0;
-let cmdCount = 0;
-let busy     = false;
-let msgId    = 0;
-
-const MODEL = "deepseek-coder";
+// ── State ──────────────────────────────────────────────────────────────────────
+let msgCount  = 0;
+let cmdCount  = 0;
+let busy      = false;
+let msgId     = 0;
+let activeCreds: Record<string, string> = {};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function scrollBottom() {
@@ -58,7 +56,7 @@ function setBusy(on: boolean) {
 
 // ── Render functions ──────────────────────────────────────────────────────────
 function appendBubble(role: "u" | "a" | "s", content: string) {
-  const labels: Record<string, string> = { u: "You", a: "DeepSeek", s: "System" };
+  const labels: Record<string, string> = { u: "You", a: "Agent", s: "System" };
   const d = document.createElement("div");
   d.className = "msg";
   d.innerHTML = `
@@ -71,9 +69,9 @@ function appendBubble(role: "u" | "a" | "s", content: string) {
 
 function appendBash(cmd: string, n: number) {
   const lines = cmd.trim().split("\n");
-  const inner = lines.length === 1
-    ? `<span class="pr">$ </span><span>${escHtml(cmd.trim())}</span>`
-    : lines.map((l, i) => `<span class="pr">${i === 0 ? "$ " : "  "}</span><span>${escHtml(l)}</span>`).join("<br>");
+  const inner = lines.map((l, i) =>
+    `<span class="pr">${i === 0 ? "$ " : "  "}</span><span>${escHtml(l)}</span>`
+  ).join("<br>");
 
   const d = document.createElement("div");
   d.className = "bash";
@@ -90,7 +88,7 @@ function appendBash(cmd: string, n: number) {
 
 function appendOutput(output: string) {
   const lines = output.trim().split("\n");
-  const MAX = 30;
+  const MAX   = 30;
   const shown = lines.slice(0, MAX).map(l => escHtml(l)).join("\n");
   const extra = lines.length > MAX ? `\n… (${lines.length - MAX} more lines)` : "";
   const d = document.createElement("div");
@@ -101,7 +99,7 @@ function appendOutput(output: string) {
 }
 
 function appendFile(action: "read" | "write", path: string) {
-  const d = document.createElement("div");
+  const d   = document.createElement("div");
   d.className = "fev";
   const icon = action === "write" ? "✎" : "📖";
   const col  = action === "write" ? "var(--orange)" : "var(--teal)";
@@ -116,7 +114,6 @@ function renderTodo(items: TodoItem[]) {
   const done  = items.filter(t => t.status === "completed").length;
   const total = items.length;
   const pct   = Math.round((done / total) * 100);
-
   toFill.style.width = pct + "%";
 
   const iconMap: Record<string, [string, string]> = {
@@ -149,6 +146,14 @@ function handleEvent(e: AgentEvent) {
     case "thinking":
       setThinking(true, e.detail || "Thinking…");
       break;
+
+    case "step_start": {
+      try {
+        const s = JSON.parse(e.detail);
+        setThinking(true, s.desc || "Executing step…");
+      } catch { setThinking(true, "Executing step…"); }
+      break;
+    }
 
     case "exec": {
       setThinking(false);
@@ -187,25 +192,35 @@ function handleEvent(e: AgentEvent) {
       setBusy(false);
       appendBubble("s", "⚠ " + e.detail);
       break;
+
+    case "auth_ok":
+      break; // handled in login.ts
+
+    case "auth_fail":
+      break; // handled in login.ts
   }
 }
 
 function sendMessage(text: string) {
-  const id = String(++msgId);
-  const payload = JSON.stringify({ id, message: text, model: MODEL });
+  const id      = String(++msgId);
+  const payload = JSON.stringify({
+    id,
+    message: text,
+    ...activeCreds,         // provider, model, api_key, email, etc.
+  });
 
-  if (window.agent) {
-    window.agent.send(payload);
+  if ((window as any).agent) {
+    (window as any).agent.send(payload);
   } else {
-    // Dev-mode mock — echo back
-    setTimeout(() => handleEvent({ id, action: "done", detail: `[mock] received: ${text}` }), 800);
+    // Dev-mode mock
+    setTimeout(() => handleEvent({ id, action: "done", detail: `[mock] ${text}` }), 800);
   }
 }
 
 // ── Wire up IPC ───────────────────────────────────────────────────────────────
-if (window.agent) {
-  window.agent.on(handleEvent);
-  window.agent.onStderr((msg: string) => {
+if ((window as any).agent) {
+  (window as any).agent.on(handleEvent);
+  (window as any).agent.onStderr((msg: string) => {
     console.warn("[agent stderr]", msg);
   });
 }
@@ -216,10 +231,8 @@ const COMMANDS: Record<string, () => void> = {
     "Commands:",
     "  /exit /quit   — quit",
     "  /clear        — clear history",
-    "  /tools        — list tools",
-    "  /model <name> — switch model",
+    "  /tools        — list available tools",
     "  /status       — connection status",
-    "  /history      — last messages",
   ].join("\n")),
 
   "/clear": () => {
@@ -229,24 +242,32 @@ const COMMANDS: Record<string, () => void> = {
     appendBubble("s", "History cleared.");
   },
 
-  "/exit":  () => window.close(),
-  "/quit":  () => window.close(),
+  "/tools": () => appendBubble("s", [
+    "Tools: nmap, ping, traceroute, whois, dig, curl, nc,",
+    "  ffuf, gobuster, nikto, whatweb, hydra, john, hashcat,",
+    "  sqlmap, wpscan, dirb, enum4linux, smbclient, amass,",
+    "  subfinder, dnsx, httpx, nuclei, arjun, xsstrike,",
+    "  commix, tshark, read_file, write_file, grep, bash",
+  ].join("\n")),
 
-  "/status": () => appendBubble("s", `model: ${MODEL} · msgs: ${msgCount} · cmds: ${cmdCount}`),
+  "/exit":   () => window.close(),
+  "/quit":   () => window.close(),
+
+  "/status": () => appendBubble("s",
+    `provider: ${activeCreds.provider || "auto"} · model: ${activeCreds.model || "default"} · msgs: ${msgCount} · cmds: ${cmdCount}`
+  ),
 };
 
 // ── Input handling ────────────────────────────────────────────────────────────
 inp.addEventListener("keydown", (e) => {
-  if (e.key !== "Enter") return;
+  if (e.key !== "Enter" || busy) return;
   const raw = inp.value.trim();
   if (!raw) return;
   inp.value = "";
 
-  // Slash command?
   const base = raw.split(" ")[0].toLowerCase();
   if (COMMANDS[base]) { COMMANDS[base](); return; }
 
-  // Normal message
   msgCount++;
   sbCount.textContent = String(msgCount);
   appendBubble("u", raw);
@@ -255,22 +276,37 @@ inp.addEventListener("keydown", (e) => {
   sendMessage(raw);
 });
 
-// Focus input on click anywhere
-document.addEventListener("click", () => { if (!document.getElementById("login-overlay")) inp.focus(); });
-// ── Boot — show login first, then init ───────────────────────────────────────
-showLogin((email, password) => {
-  // Store credentials so bridge.py can use them
-  if (window.agent) {
-    window.agent.send(JSON.stringify({ id: "__creds__", message: "__SET_CREDS__", email, password }));
-  }
-  // Reveal UI
-  document.getElementById("app")!.style.opacity = "1";
-  inp.focus();
+document.addEventListener("click", () => {
+  if (!document.getElementById("login-overlay")) inp.focus();
 });
 
-// Hide app until login succeeds
+// ── Boot — show login, then reveal UI ────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
   const app = document.getElementById("app");
   if (app) app.style.opacity = "0";
 });
 
+showLogin((creds) => {
+  activeCreds = creds;
+
+  // Update statusbar model badge
+  sbModel.textContent  = creds.model || "—";
+
+  // Send creds to bridge
+  if ((window as any).agent) {
+    (window as any).agent.send(JSON.stringify({
+      id: "__creds__",
+      message: "__SET_CREDS__",
+      ...creds,
+    }));
+  }
+
+  const app = document.getElementById("app")!;
+  app.style.transition = "opacity 0.4s";
+  app.style.opacity    = "1";
+  inp.focus();
+
+  appendBubble("s",
+    `Connected · provider: ${creds.provider} · model: ${creds.model}\nType /help for commands.`
+  );
+});

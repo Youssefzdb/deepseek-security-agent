@@ -1,330 +1,294 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>DeepSeek Security Agent</title>
   <style>
-    *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
-
+    /* ─── Reset & font ───────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
-      --gold:   #c8aa50;
-      --orange: #d4a72c;
-      --teal:   #56c8d8;
-      --green:  #38a860;
-      --blue:   #4888cc;
-      --grey:   #585858;
-      --dgrey:  #282828;
-      --white:  #c8c8b8;
-      --dwhite: #888878;
-      --rust:   #e06c75;
-      --bg:     #0a0a0a;
-      --bg2:    #0d0d0d;
+      --gold:    #c8aa50;
+      --gold2:   #a08840;
+      --bg:      #000;
+      --bg2:     #080808;
+      --bg3:     #0e0e0e;
+      --border:  #1a1a1a;
+      --dwhite:  #c8c8b8;
+      --gray:    #585858;
+      --orange:  #d4905a;
+      --teal:    #5abcd4;
+      --green:   #56c27a;
+      --red:     #c25656;
+      --font:    'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'SF Mono', monospace;
     }
-
     html, body {
-      width:100%; height:100%;
-      background: var(--bg);
-      color: var(--white);
-      font-family: 'Cascadia Code','Fira Code','JetBrains Mono',monospace;
-      overflow: hidden;
-      user-select: none;
+      width: 100%; height: 100%;
+      background: var(--bg); color: var(--dwhite);
+      font-family: var(--font); font-size: 13px;
+      overflow: hidden;          /* ← No page scroll ever */
     }
 
-    /* ── Drag region for frameless window ───────────────── */
-    #titlebar {
-      -webkit-app-region: drag;
-      height: 28px;
-      background: #060606;
-      display: flex;
-      align-items: center;
-      padding: 0 14px;
-      border-bottom: 1px solid #151515;
-      font-size: 12px;
-      color: #333;
-      flex-shrink: 0;
-    }
-    #titlebar .traffic {
-      -webkit-app-region: no-drag;
-      display: flex; gap: 6px; margin-right: 14px;
-    }
-    #titlebar .traffic span {
-      width:11px; height:11px; border-radius:50%; cursor:pointer;
-    }
-    #titlebar .traffic .r { background:#ff5f57; }
-    #titlebar .traffic .y { background:#febc2e; }
-    #titlebar .traffic .g { background:#28c840; }
-    #titlebar .title { flex:1; text-align:center; }
-
-    /* ── Main layout ─────────────────────────────────────── */
+    /* ─── App shell — fixed layout, 3 rows ──────────────────────────────── */
     #app {
-      display: grid;
-      grid-template-columns: 320px 1fr;
-      height: calc(100vh - 28px);
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      opacity: 0;                /* revealed after login */
     }
 
-    /* ─── LEFT: 3D mask panel ────────────────────────────── */
-    #left {
-      display: flex;
-      flex-direction: column;
-      border-right: 1px solid #151515;
-      background: #060606;
-      overflow: hidden;
+    /* ─── Header ─────────────────────────────────────────────────────────── */
+    #hdr {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 14px;
+      padding: 10px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg2);
+      min-height: 64px;
     }
 
+    /* 3D rotating mask — canvas */
     #mask-canvas {
-      width: 100%;
-      height: 260px;
+      width: 52px; height: 52px;
+      border-radius: 6px;
       flex-shrink: 0;
       display: block;
     }
 
-    #mask-meta {
-      text-align: center;
-      padding: 8px 12px 10px;
-      border-bottom: 1px solid #111;
+    #hdr-title {
+      display: flex; flex-direction: column; gap: 2px;
     }
-    #mask-meta h1 { font-size:13px; color:var(--gold); letter-spacing:2px; text-transform:uppercase; }
-    #mask-meta p  { font-size:11px; color:var(--grey); margin-top:2px; }
-
-    #left-body {
-      flex:1; overflow-y:auto; padding:14px 14px 0;
-      scrollbar-width: none;
+    #hdr-title .name {
+      font-size: 13px; font-weight: 700;
+      color: var(--gold); letter-spacing: 2px; text-transform: uppercase;
     }
-    #left-body::-webkit-scrollbar { display:none; }
-
-    .section { margin-bottom:16px; }
-    .section h3 { font-size:10px; color:var(--orange); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
-    .row { display:flex; gap:8px; margin-bottom:3px; font-size:11px; }
-    .row .t { color:var(--grey); width:54px; flex-shrink:0; }
-    .row .d { color:var(--dwhite); }
-    .ni { font-size:11px; color:var(--dwhite); margin-bottom:3px; }
-    .ni.hi { color:#90b870; }
-
-    #status-dot {
-      display:flex; align-items:center; gap:8px;
-      padding:10px 14px; border-top:1px solid #111;
-      font-size:11px; flex-shrink:0;
+    #hdr-title .sub {
+      font-size: 10px; color: var(--gray); letter-spacing: 1px;
     }
-    .dot {
-      width:7px; height:7px; border-radius:50%;
-      background:var(--green); box-shadow:0 0 6px var(--green);
-      animation: pulse 2s ease-in-out infinite;
-    }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
-    #status-dot .lbl { color:var(--grey); }
-    #status-dot .val { color:var(--gold); font-weight:bold; }
 
-    /* ─── RIGHT: terminal panel ──────────────────────────── */
-    #right {
+    /* Thinking indicator (inline) */
+    #think {
+      margin-left: auto;
+      font-size: 11px; color: var(--gold2);
+      opacity: 0; transition: opacity 0.2s;
+      white-space: nowrap;
+    }
+    #think.vis { opacity: 1; }
+    #think::before { content: "⟳ "; animation: spin 1s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ─── Status bar (between header and chat) ───────────────────────────── */
+    #sb {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 12px;
+      padding: 4px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg3);
+      font-size: 10px; color: var(--gray);
+    }
+    #sb-sep { color: var(--border); }
+    #sb-model { color: var(--teal); }
+    #sb-status { color: var(--green); }
+    #sb-spin { display: none; }
+    #sb-spin.vis { display: inline; animation: spin 1.2s linear infinite; }
+
+    /* ─── Main content area ─────────────────────────────────────────────── */
+    #main {
+      flex: 1 1 0;               /* fills remaining height */
       display: flex;
+      overflow: hidden;          /* children handle their own scroll */
+    }
+
+    /* ─── Sidebar todo panel ────────────────────────────────────────────── */
+    #todo {
+      flex: 0 0 220px;
+      border-right: 1px solid var(--border);
+      background: var(--bg2);
+      display: none;             /* hidden until tasks appear */
       flex-direction: column;
       overflow: hidden;
     }
+    #todo.vis { display: flex; }
+    #todo-hdr {
+      font-size: 10px; color: var(--gray);
+      padding: 10px 14px 6px;
+      border-bottom: 1px solid var(--border);
+      letter-spacing: 1px; text-transform: uppercase;
+    }
+    /* Progress bar */
+    #to-bar {
+      height: 2px; background: var(--border); margin: 0 14px 8px;
+    }
+    #to-fill {
+      height: 100%; background: var(--gold);
+      transition: width 0.3s ease;
+      width: 0%;
+    }
+    #to-items {
+      flex: 1; overflow-y: auto;
+      padding: 0 12px 8px;
+      scrollbar-width: none;
+    }
+    #to-items::-webkit-scrollbar { display: none; }
+    .to-item {
+      display: flex; align-items: flex-start; gap: 7px;
+      padding: 5px 2px; font-size: 11px;
+      border-bottom: 1px solid var(--border);
+    }
+    .to-item:last-child { border-bottom: none; }
+    .ti { flex-shrink: 0; width: 12px; font-size: 11px; }
+    .ti.p { color: var(--gray); }
+    .ti.i { color: var(--gold); }
+    .ti.c { color: var(--green); }
+    .ti.x { color: var(--red); }
+    .tt { color: var(--dwhite); line-height: 1.4; word-break: break-word; }
+    .tt.d { color: var(--gray); text-decoration: line-through; }
 
-    /* Messages area */
+    /* ─── Chat pane ─────────────────────────────────────────────────────── */
+    #chat {
+      flex: 1;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Message scroll area — THIS is the only thing that scrolls */
     #msgs {
-      flex:1;
+      flex: 1 1 0;
       overflow-y: auto;
-      padding: 14px 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-      scroll-behavior: smooth;
+      padding: 18px 22px;
+      display: flex; flex-direction: column; gap: 12px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
     }
-    #msgs::-webkit-scrollbar { width:3px; }
-    #msgs::-webkit-scrollbar-thumb { background:#1a1a1a; border-radius:2px; }
+    #msgs::-webkit-scrollbar { width: 4px; }
+    #msgs::-webkit-scrollbar-track { background: transparent; }
+    #msgs::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 
-    /* Welcome card */
-    .welcome {
-      border:1px solid #1a1a1a; border-radius:6px;
-      padding:16px; margin-bottom:10px; background:var(--bg2);
-    }
-    .welcome .wh { font-size:12px; color:var(--gold); margin-bottom:6px; letter-spacing:1px; }
-    .welcome .wb { font-size:12px; color:var(--dwhite); line-height:1.7; }
-    .welcome .wf { font-size:11px; color:#2a2a2a; margin-top:10px; }
-    .welcome .wf kbd {
-      background:#151515; border:1px solid #2a2a2a;
-      border-radius:3px; padding:1px 5px; font-size:11px; color:var(--white);
-      font-family: inherit;
-    }
-
-    /* Bubbles */
-    .msg { display:flex; flex-direction:column; margin:5px 0; }
-    .ml  { font-size:10px; margin-bottom:3px; font-weight:bold; }
-    .ml.u { color:var(--blue); }
-    .ml.a { color:var(--green); }
-    .ml.s { color:var(--grey); }
+    /* ─── Message bubbles ────────────────────────────────────────────────── */
+    .msg { display: flex; flex-direction: column; gap: 4px; max-width: 800px; }
+    .ml { font-size: 10px; letter-spacing: 1px; text-transform: uppercase; }
+    .ml.u { color: var(--gold); }
+    .ml.a { color: var(--teal); }
+    .ml.s { color: var(--gray); }
     .mb {
-      border-radius:6px; padding:9px 14px;
-      font-size:12px; line-height:1.65; white-space:pre-wrap; word-break:break-word;
+      padding: 10px 14px; border-radius: 6px;
+      line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+      font-size: 12px;
     }
-    .mb.u { border:1px solid #1e3050; background:#090f1a; }
-    .mb.a { border:1px solid #162a1e; background:#07110e; }
-    .mb.s { border:1px solid #181818; background:#0a0a0a; color:var(--grey); font-size:11px; }
+    .mb.u { background: #0d0d0d; border: 1px solid #1e1e1e; color: var(--dwhite); align-self: flex-end; }
+    .mb.a { background: #06090d; border: 1px solid #12243a; color: #a8cce8; }
+    .mb.s { background: transparent; color: var(--gray); font-size: 11px; border: none; padding: 2px 0; }
 
-    /* Bash block */
-    .bash { margin:5px 0; }
-    .bh { font-size:11px; margin-bottom:3px; }
-    .bh .ar { color:var(--orange); font-weight:bold; }
-    .bh .bn { color:#2a2a2a; }
-    .bc { border:1px solid #1e1600; border-radius:5px; background:#080602; padding:7px 12px; font-size:12px; }
-    .bc .pr { color:var(--teal); font-weight:bold; }
+    /* ─── Bash block ──────────────────────────────────────────────────────── */
+    .bash {
+      background: #080808; border: 1px solid #1e1e1e; border-radius: 6px;
+      overflow: hidden; font-size: 11px;
+    }
+    .bh {
+      background: #0e0e0e; padding: 5px 12px;
+      border-bottom: 1px solid #1a1a1a;
+      display: flex; align-items: center; gap: 0;
+    }
+    .ar { color: var(--orange); font-size: 10px; }
+    .bn { color: var(--gray);   font-size: 10px; }
+    .bc { padding: 10px 12px; color: #98d4a8; line-height: 1.6; }
+    .pr { color: var(--gold2); user-select: none; }
 
-    /* Output */
+    /* ─── Output block ───────────────────────────────────────────────────── */
     .out {
-      border:1px solid #141414; border-radius:5px;
-      background:#060606; padding:7px 12px;
-      margin:3px 0 3px 18px; font-size:11px; color:var(--dwhite);
-      max-height:180px; overflow-y:auto;
+      background: #050505; border: 1px solid #151515; border-radius: 6px;
+      padding: 10px 12px; font-size: 11px;
     }
-    .out-title { font-size:10px; color:#2a2a2a; margin-bottom:3px; }
+    .out-title { color: var(--gray); font-size: 10px; margin-bottom: 6px; letter-spacing: 1px; }
+    .out pre   { color: #8ab8a8; line-height: 1.6; }
 
-    /* File event */
-    .fev { padding:3px 18px; font-size:11px; }
-
-    /* Todo panel */
-    #todo {
-      border:1px solid #181818; border-radius:6px;
-      padding:10px 14px; margin:6px 18px;
-      background:var(--bg2); display:none;
+    /* ─── File event ─────────────────────────────────────────────────────── */
+    .fev {
+      font-size: 11px; padding: 3px 0;
+      display: flex; align-items: center; gap: 8px;
     }
-    #todo.vis { display:block; }
-    .to-title { font-size:11px; color:var(--orange); font-weight:bold; margin-bottom:6px; }
-    .to-bar   { height:2px; background:#151515; border-radius:1px; margin-bottom:8px; overflow:hidden; }
-    .to-fill  { height:100%; background:var(--green); border-radius:1px; transition:width .4s ease; box-shadow:0 0 5px var(--green); }
-    .to-item  { display:flex; gap:7px; font-size:11px; margin-bottom:3px; }
-    .ti.p  { color:var(--grey); }
-    .ti.i  { color:var(--orange); }
-    .ti.c  { color:var(--green); }
-    .ti.x  { color:var(--rust); }
-    .tt.d  { color:#2a2a2a; text-decoration:line-through; }
-    .tt    { color:var(--white); }
 
-    /* Thinking */
-    #think { display:none; padding:5px 18px; font-size:11px; color:var(--orange); font-style:italic; }
-    #think.vis { display:block; }
-    #think::before { content:'● '; animation:bl 1s step-end infinite; }
-    @keyframes bl { 0%,100%{opacity:1} 50%{opacity:0} }
-
-    /* Status bar */
-    #sb {
-      display:flex; justify-content:space-between; align-items:center;
-      padding:5px 18px; border-top:1px solid #111; background:#060606;
-      font-size:11px; flex-shrink:0;
+    /* ─── Input bar — fixed at bottom ────────────────────────────────────── */
+    #inp-row {
+      flex: 0 0 auto;
+      border-top: 1px solid var(--border);
+      background: var(--bg2);
+      padding: 12px 18px;
+      display: flex; align-items: center; gap: 10px;
     }
-    #sb .sm { color:var(--gold); font-weight:bold; }
-    #sb .sc { color:var(--dwhite); }
-    #sb-spin { color:var(--orange); display:none; }
-    #sb-spin.vis { display:inline; }
-
-    /* Input bar */
-    #ib {
-      display:flex; align-items:center; gap:8px;
-      padding:10px 18px; border-top:1px solid #1a1a1a;
-      background:#080808; flex-shrink:0;
+    #inp-prompt {
+      color: var(--gold); font-size: 13px; user-select: none; flex-shrink: 0;
     }
-    #ib .ar { color:var(--teal); font-size:15px; font-weight:bold; flex-shrink:0; }
-    #ib input {
-      flex:1; background:transparent; border:none; outline:none;
-      color:var(--white); font-family:inherit; font-size:13px;
-      caret-color:var(--gold); user-select:text;
+    #inp {
+      flex: 1;
+      background: transparent; border: none; outline: none;
+      color: var(--dwhite); font-family: var(--font); font-size: 13px;
+      caret-color: var(--gold);
     }
-    #ib input::placeholder { color:#252525; font-style:italic; }
-    #ib input:disabled { opacity:.3; }
-    #ib .cur { color:var(--gold); font-weight:bold; animation:bl 1s step-end infinite; }
+    #inp::placeholder { color: #333; }
+    #inp:disabled { opacity: 0.4; }
   </style>
 </head>
 <body>
+  <div id="app">
 
-<!-- Frameless titlebar -->
-<div id="titlebar">
-  <div class="traffic">
-    <span class="r" onclick="window.close()"></span>
-    <span class="y"></span>
-    <span class="g"></span>
-  </div>
-  <span class="title">deepseek-security-agent</span>
-</div>
+    <!-- ── Header ──────────────────────────────────────────────────────── -->
+    <div id="hdr">
+      <!-- 3D rotating Anonymous mask (drawn by mask-init.ts) -->
+      <canvas id="mask-canvas" width="52" height="52"></canvas>
 
-<div id="app">
-
-  <!-- LEFT: 3D Mask -->
-  <div id="left">
-    <canvas id="mask-canvas"></canvas>
-    <div id="mask-meta">
-      <h1>DeepSeek Agent</h1>
-      <p id="model-p">deepseek-coder · 30 tools</p>
-    </div>
-    <div id="left-body">
-      <div class="section">
-        <h3>Recent Activity</h3>
-        <div class="row"><span class="t">1m ago</span><span class="d">Updated project memory</span></div>
-        <div class="row"><span class="t">8m ago</span><span class="d">Plan-execute loop ran</span></div>
-        <div class="row"><span class="t">2d ago</span><span class="d">Refactored SSE parser</span></div>
-        <div class="row"><span class="t">1w ago</span><span class="d">Added PoW C-solver</span></div>
+      <div id="hdr-title">
+        <span class="name">DeepSeek Security Agent</span>
+        <span class="sub" id="sb-model">—</span>
       </div>
-      <div class="section">
-        <h3>What's New</h3>
-        <div class="ni hi">/plan  — preview task steps</div>
-        <div class="ni">/model — switch model</div>
-        <div class="ni">/tools — list all 30 tools</div>
-        <div class="ni">ctrl+c — interrupt task</div>
-      </div>
-    </div>
-    <div id="status-dot">
-      <div class="dot"></div>
-      <span class="lbl">model: </span>
-      <span class="val" id="badge-model">deepseek-coder</span>
-    </div>
-  </div>
 
-  <!-- RIGHT: Terminal -->
-  <div id="right">
-    <div id="msgs">
-      <div class="welcome">
-        <div class="wh">── Welcome back ──</div>
-        <div class="wb">DeepSeek Security Agent is ready.<br>
-          27 tools loaded · Plan-then-Execute active.<br>
-          PoW auth + SSE stream parser initialized.
-        </div>
-        <div class="wf">
-          <kbd>/help</kbd> commands &nbsp;·&nbsp;
-          <kbd>Ctrl+C</kbd> interrupt &nbsp;·&nbsp;
-          <kbd>/exit</kbd> quit
-        </div>
-      </div>
+      <div id="think">Thinking…</div>
     </div>
 
-    <div id="todo">
-      <div class="to-title">Task Progress</div>
-      <div class="to-bar"><div class="to-fill" id="to-fill" style="width:0%"></div></div>
-      <div id="to-items"></div>
-    </div>
-
-    <div id="think">Thinking…</div>
-
+    <!-- ── Thin status bar ─────────────────────────────────────────────── -->
     <div id="sb">
-      <div><span style="color:#2a2a2a">model: </span><span class="sm" id="sb-model">deepseek-coder</span></div>
-      <div><span id="sb-spin">⠋ </span><span id="sb-status" style="color:#2a2a2a">idle</span></div>
-      <div><span style="color:#2a2a2a">msgs: </span><span class="sc" id="sb-count">0</span></div>
+      <span>⟳ <span id="sb-spin" class="vis">●</span></span>
+      <span id="sb-sep">·</span>
+      <span id="sb-status">idle</span>
+      <span id="sb-sep">·</span>
+      msgs: <span id="sb-count">0</span>
     </div>
 
-    <div id="ib">
-      <span class="ar">❯</span>
-      <input type="text" id="inp" placeholder='Try "scan 192.168.1.0/24" or /help' autocomplete="off" spellcheck="false"/>
-      <span class="cur">█</span>
+    <!-- ── Main (sidebar + chat) ───────────────────────────────────────── -->
+    <div id="main">
+
+      <!-- Todo sidebar -->
+      <div id="todo">
+        <div id="todo-hdr">Tasks</div>
+        <div id="to-bar"><div id="to-fill"></div></div>
+        <div id="to-items"></div>
+      </div>
+
+      <!-- Chat -->
+      <div id="chat">
+        <!-- Scrollable messages — only this scrolls -->
+        <div id="msgs"></div>
+
+        <!-- Fixed input bar -->
+        <div id="inp-row">
+          <span id="inp-prompt">›</span>
+          <input id="inp" type="text" autocomplete="off"
+            placeholder="Enter command or question… (/help)" />
+        </div>
+      </div>
+
     </div>
   </div>
-</div>
 
-<!-- Three.js mask (CDN — works in Electron too) -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- Three.js CDN (used by mask-init.ts and login.ts) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js"
+    }
+  }
+  </script>
 
-<script>
-// ─── Paste the compiled mask.js logic inline ──────────────────────────────
-</script>
-<script type="module" src="/src/mask-init.ts"></script>
-<script type="module" src="/src/ui.ts"></script>
+  <!-- Main app entry -->
+  <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

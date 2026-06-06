@@ -1,14 +1,13 @@
 /**
- * Entry point — attaches the mask to the page canvas
+ * main.ts — Entry point.
+ * 1. Initialize the 3D rotating header mask
+ * 2. Boot the terminal UI (which will show login first)
  */
-import { init } from "./mask.js";
+import { initHeaderMask } from "./mask-init.js";
+import "./ui.js";
 
-const canvas = document.getElementById("canvas") as HTMLCanvasElement;
-if (!canvas) throw new Error("Canvas element not found");
-
-const cleanup = init(canvas);
-
-// Hot-reload support (Vite / webpack HMR)
-if (import.meta.hot) {
-  import.meta.hot.dispose(cleanup);
-}
+// Mount the mask animation on the header canvas
+// (ui.ts / login.ts handle their own canvas for the login screen mask)
+document.addEventListener("DOMContentLoaded", () => {
+  initHeaderMask();
+});
