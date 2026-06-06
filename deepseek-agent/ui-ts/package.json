@@ -6,14 +6,9 @@
   "main": "electron/main.js",
   "scripts": {
     "postinstall": "electron-builder install-app-deps 2>/dev/null || true",
-    "dev": "node scripts/dev.js",
     "build": "tsc -p tsconfig.vite.json --noEmit && vite build && tsc -p tsconfig.electron.json",
-    "start": "electron .",
-    "preview": "vite preview",
-    "ds": "node scripts/ds.js"
-  },
-  "bin": {
-    "ds": "./scripts/ds.js"
+    "dev": "node scripts/dev.js",
+    "start": "node scripts/dev.js"
   },
   "dependencies": {
     "three": "^0.165.0",
