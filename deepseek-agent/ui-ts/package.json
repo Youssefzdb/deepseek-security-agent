@@ -1,7 +1,7 @@
 {
   "name": "deepseek-agent-ui",
   "version": "2.0.0",
-  "description": "DeepSeek Security Agent — Electron terminal with Three.js 3D mask",
+  "description": "DeepSeek Security Agent — Electron terminal with 3D mask",
   "type": "commonjs",
   "main": "electron/main.js",
   "scripts": {
@@ -9,7 +9,8 @@
     "dev": "node scripts/dev.js",
     "build": "tsc -p tsconfig.vite.json --noEmit && vite build && tsc -p tsconfig.electron.json",
     "start": "electron .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "ds": "node scripts/ds.js"
   },
   "bin": {
     "ds": "./scripts/ds.js"
